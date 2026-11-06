@@ -248,6 +248,44 @@ $('save-confirm').addEventListener('click', async () => {
 });
 
 // ---------- clear current site cookies ----------
+// Direct fallback: delete browser cookies from this page itself, without
+// going through the background worker (used if the background call fails).
+function parentDomains(hostname) {
+  const parts = String(hostname || '').replace(/^\./, '').split('.').filter(Boolean);
+  const out = [];
+  while (parts.length >= 2) { out.push(parts.join('.')); parts.shift(); }
+  return out;
+}
+async function getAllCookiesForDomainDirect(domain, tabUrl) {
+  const byKey = new Map();
+  const add = (list) => { for (const c of list || []) { const k = [c.name, c.domain, c.path, c.storeId || ''].join('\x00'); if (!byKey.has(k)) byKey.set(k, c); } };
+  for (const d of parentDomains(domain)) { try { add(await chrome.cookies.getAll({ domain: d })); } catch { /* ignore */ } }
+  if (tabUrl) { try { add(await chrome.cookies.getAll({ url: tabUrl })); } catch { /* ignore */ } }
+  return [...byKey.values()];
+}
+async function removeCookieDirect(c) {
+  const host = String(c.domain || '').replace(/^\./, '');
+  const schemes = [c.secure ? 'https' : 'http', c.secure ? 'http' : 'https'];
+  for (const scheme of schemes) {
+    for (const path of [c.path || '/', '/']) {
+      for (const details of [
+        { url: `${scheme}://${host}${path}`, name: c.name, storeId: c.storeId },
+        { url: `${scheme}://${host}${path}`, name: c.name },
+      ]) {
+        try { const r = await chrome.cookies.remove(details); if (r) return true; } catch { /* next */ }
+      }
+    }
+  }
+  return false;
+}
+async function clearCookiesDirect(domain, tabUrl) {
+  const existing = await getAllCookiesForDomainDirect(domain, tabUrl);
+  let removed = 0; const failures = [];
+  for (const c of existing) { if (await removeCookieDirect(c)) removed++; else failures.push(c.name); }
+  const remaining = await getAllCookiesForDomainDirect(domain, tabUrl);
+  return { domain, removed, failed: failures.length, failures, total: existing.length, remaining: remaining.length };
+}
+
 // Always clears the cookies of the page in the currently active browser
 // tab (resolved fresh in the background at click time), never the
 // configured server address or a snapshot's domain.
@@ -261,12 +299,27 @@ async function clearSiteCookies() {
     title: '清空当前站点 Cookie', danger: true, okText: '清空',
     body: `确定清空当前标签页所在站点${domain ? `（${domain}）` : ''}的全部 Cookie？\n清空后刷新页面即可测试未登录状态，之后再点「恢复」恢复某个快照的登录态。`,
     onOk: async () => {
+      let res = null; let bgError = '';
       try {
         const r = await chrome.runtime.sendMessage({ type: 'CLEAR', domain: domain || undefined });
-        if (!r.ok) throw new Error(r.error);
-        const res = r.result;
-        toast(`已清空 ${res.domain}：删除 ${res.removed}/${res.total} 个${res.failed ? `，失败 ${res.failed}（${res.failures.join(', ')}）` : ''}${res.remaining ? `，仍剩 ${res.remaining} 个（站点可能重新写入）` : ''}，请刷新页面测试未登录状态`);
-      } catch (e) { toast('清空失败：' + e.message); }
+        if (r && r.ok) res = r.result; else bgError = (r && r.error) || 'background 无响应';
+      } catch (e) { bgError = e.message || String(e); }
+      let prefix = '';
+      if (!res) {
+        // Fallback: delete directly from this page.
+        try {
+          const tabs2 = await chrome.tabs.query({ active: true, currentWindow: true });
+          const t = tabs2[0];
+          const d = domain || (t?.url ? new URL(t.url).hostname : '');
+          if (!d) throw new Error('无法识别当前标签页域名');
+          res = await clearCookiesDirect(d, t?.url || undefined);
+          prefix = `（background 失败[${bgError}]，已改直连删除）`;
+        } catch (e2) {
+          toast(`清空失败：background 报错 ${bgError}；直连也失败 ${e2.message || e2}`);
+          return;
+        }
+      }
+      toast(`已清空 ${res.domain}：删除 ${res.removed}/${res.total} 个${res.failed ? `，失败 ${res.failed}（${res.failures.join(', ')}）` : ''}${res.remaining ? `，仍剩 ${res.remaining} 个（站点可能重新写入）` : ''}${prefix}，请刷新页面测试未登录状态`);
     },
   });
 }

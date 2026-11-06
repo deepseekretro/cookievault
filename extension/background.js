@@ -335,7 +335,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         default: return sendResponse({ ok: false, error: 'unknown message' });
       }
     } catch (e) {
-      return sendResponse({ ok: false, error: e.message, code: e.code, status: e.status });
+      console.error('[CookieVault] message handler failed:', msg && msg.type, e);
+      return sendResponse({ ok: false, error: `${(e && e.name) || 'Error'}: ${(e && e.message) || String(e)}`, code: e.code, status: e.status });
     }
   })();
   return true; // async response
