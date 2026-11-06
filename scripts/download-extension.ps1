@@ -153,7 +153,12 @@ try {
       Expand-Archive -Path $Zip -DestinationPath $Src -Force
     }
   } catch {
-    Write-Host "No release asset available ($($_.Exception.Message)), falling back to source archive."
+    $msg = $_.Exception.Message
+    if ($msg -match "404") {
+      Write-Host "No GitHub Release published yet (404), falling back to source archive."
+    } else {
+      Write-Host "No release asset available ($msg), falling back to source archive."
+    }
   }
 
   # 2) Fallback: repo source archive (master branch)
