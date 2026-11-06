@@ -47,7 +47,12 @@
     </header>
 
     <div id="locked-banner" class="banner hidden">
-      🔒 服务端已锁定，请到「设置」Tab 解锁。
+      <div class="unlock-row">
+        <span>🔒 已锁定</span>
+        <input id="unlock-pw" type="password" placeholder="输入主密码解锁" autocomplete="current-password" />
+        <button id="unlock-btn" class="btn primary small">解锁</button>
+      </div>
+      <div id="unlock-status" class="muted"></div>
     </div>
     <div id="error-banner" class="banner error hidden">
       <span id="error-text"></span>

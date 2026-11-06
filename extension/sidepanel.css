@@ -42,6 +42,9 @@ body { background: var(--bg); color: var(--text); font: 13px/1.45 system-ui, -ap
 .link-btn { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; }
 
 .banner { margin: 8px 12px 0; padding: 8px 10px; border-radius: var(--radius); background: #fffbeb; border: 1px solid #fcd34d; font-size: 12px; }
+.unlock-row { display: flex; align-items: center; gap: 6px; }
+.unlock-row input { flex: 1; min-width: 0; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; color: var(--text); outline: 0; }
+#unlock-status { margin-top: 4px; }
 .banner.error { background: #fef2f2; border-color: #fca5a5; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .grid2 .full { grid-column: 1 / -1; }

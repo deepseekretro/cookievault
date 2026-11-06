@@ -209,6 +209,26 @@ $('scroll').addEventListener('scroll', () => {
   }
 }, { passive: true });
 
+// ---------- inline unlock (data tab, no need to go to settings) ----------
+async function doUnlock() {
+  const pw = $('unlock-pw').value;
+  if (!pw) { $('unlock-status').textContent = '请输入主密码'; return; }
+  $('unlock-status').textContent = '解锁中…';
+  try {
+    await api('/v1/auth/unlock', { method: 'POST', body: { password: pw } });
+    $('unlock-pw').value = '';
+    $('unlock-status').textContent = '';
+    $('locked-banner').classList.add('hidden');
+    toast('已解锁');
+    await loadGroups();
+    loadSnapshots(true);
+  } catch (e) {
+    $('unlock-status').textContent = '解锁失败：' + e.message;
+  }
+}
+$('unlock-btn').addEventListener('click', doUnlock);
+$('unlock-pw').addEventListener('keydown', (e) => { if (e.key === 'Enter') doUnlock(); });
+
 // ---------- search (debounced) ----------
 let searchTimer = 0;
 $('search').addEventListener('input', () => {
