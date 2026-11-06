@@ -59,12 +59,13 @@ body { background: var(--bg); color: var(--text); font: 13px/1.45 system-ui, -ap
 .list-status { text-align: center; color: var(--muted); font-size: 12px; padding: 10px; }
 .statusbar { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; background: var(--panel); border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
 
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; height: 70px; display: flex; flex-direction: column; justify-content: space-between; cursor: pointer; overflow: hidden; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; height: 106px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; overflow: hidden; }
 .card:hover { border-color: var(--accent); }
 .card .row1 { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.card .label { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card .row2 { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
-.card .actions { display: flex; gap: 4px; flex: none; }
+.card .label { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .row2 { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .row3 { display: flex; gap: 6px; margin-top: auto; }
+.card .row3 .btn { flex: 1; padding: 6px 2px; font-size: 12px; white-space: nowrap; }
 mark { background: #fde68a; color: #78350f; border-radius: 2px; padding: 0 1px; }
 
 .cookie-row { height: 38px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; display: flex; align-items: center; gap: 8px; font-size: 12px; overflow: hidden; white-space: nowrap; }

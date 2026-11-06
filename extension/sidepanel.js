@@ -1,7 +1,7 @@
 // CookieVault side panel: virtual list + infinite scroll + search.
 
 const $ = (id) => document.getElementById(id);
-const ROW_H = 76;          // snapshot card height (70 + 6 gap)
+const ROW_H = 112;         // snapshot card height (106 + 6 gap)
 const COOKIE_ROW_H = 44;   // cookie row height (38 + 6 gap)
 const OVERSCAN = 5;
 const PAGE_SIZE = 50;
@@ -117,14 +117,14 @@ const snapList = new VirtualList({
     card.innerHTML = `
       <div class="row1"><span class="label">${highlight(snap.label, q)}</span>
         <span class="muted">${snap.cookie_count} 个 Cookie</span></div>
-      <div class="row2"><span>${esc(mainDomain(snap.domain))} · ${highlight(snap.domain, q)} · ${timeAgo(snap.last_used_at)}</span>
-        <span class="actions">
-          <button class="btn small primary" data-act="restore">恢复</button>
-          <button class="btn small" data-act="compare">对比</button>
-          <button class="btn small" data-act="export">导出</button>
-          <button class="btn small" data-act="rename">改名</button>
-          <button class="btn small danger" data-act="delete">删除</button>
-        </span></div>`;
+      <div class="row2"><span>${esc(mainDomain(snap.domain))} · ${highlight(snap.domain, q)} · ${timeAgo(snap.last_used_at)}</span></div>
+      <div class="row3 actions">
+        <button class="btn small primary" data-act="restore">恢复</button>
+        <button class="btn small" data-act="compare">对比</button>
+        <button class="btn small" data-act="export">导出</button>
+        <button class="btn small" data-act="rename">改名</button>
+        <button class="btn small danger" data-act="delete">删除</button>
+      </div>`;
     card.addEventListener('click', (e) => {
       const act = e.target.closest('[data-act]')?.dataset.act;
       if (act === 'restore') { e.stopPropagation(); openDetail(snap, true); return; }
