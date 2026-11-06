@@ -417,7 +417,6 @@ async function openDetail(snap, autoRestore) {
   $('view-detail').classList.remove('hidden');
   $('detail-label').textContent = snap.label;
   $('detail-meta').textContent = `${snap.domain} · ${snap.cookie_count} 个 Cookie · ${timeAgo(snap.created_at)}`;
-  $('restore-replace').checked = snap.is_replace !== false;
   $('cookie-search').value = '';
   $('cookie-status').textContent = '加载中…';
   try {
@@ -455,16 +454,15 @@ async function doRestore() {
       return;
     }
   }
-  const replace = $('restore-replace').checked;
   const backup = $('restore-backup').checked;
   showModal({
     title: '恢复快照',
-    body: `恢复「${snap.label}」（${snap.domain}）？\n${replace ? '将先清除该域名下现有 Cookie，再写入快照 Cookie。' : '将合并写入，不清除现有 Cookie。'}\n${backup ? '恢复前会自动备份当前 Cookie。' : ''}`,
+    body: `恢复「${snap.label}」（${snap.domain}）？\n恢复时会自动先清空当前站点 Cookie，再写入快照 Cookie。\n${backup ? '恢复前会自动备份当前 Cookie。' : ''}`,
     okText: '开始恢复',
     onOk: async () => {
       try {
         toast('恢复中…');
-        const r = await chrome.runtime.sendMessage({ type: 'RESTORE', id: snap.id, options: { replace, backupBefore: backup } });
+        const r = await chrome.runtime.sendMessage({ type: 'RESTORE', id: snap.id, options: { backupBefore: backup } });
         if (!r.ok) throw new Error(r.error);
         const { restored, failed, removed, backupId } = r.result;
         toast(`恢复完成：成功 ${restored}，失败 ${failed}${removed ? `，清除旧 ${removed}` : ''}${backupId ? '，已自动备份' : ''}`);
@@ -474,17 +472,6 @@ async function doRestore() {
   });
 }
 $('restore-btn').addEventListener('click', doRestore);
-
-// Persist the restore-mode preference per snapshot.
-$('restore-replace').addEventListener('change', async () => {
-  const snap = state.detailSnapshot;
-  if (!snap) return;
-  try {
-    await api(`/v1/snapshots/${snap.id}`, { method: 'PATCH', body: { is_replace: $('restore-replace').checked } });
-    snap.is_replace = $('restore-replace').checked;
-    toast($('restore-replace').checked ? '已设为替换模式' : '已设为合并模式');
-  } catch (e) { toast('保存模式偏好失败：' + e.message); }
-});
 
 // ---------- compare & single export ----------
 function openCompare(snap) {

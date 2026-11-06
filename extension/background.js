@@ -199,7 +199,7 @@ function mainDomainOf(host) {
   return parts.slice(-2).join('.');
 }
 
-async function restoreSnapshot(id, { replace = true, backupBefore = true } = {}) {
+async function restoreSnapshot(id, { backupBefore = true } = {}) {
   const { items } = await api(`/v1/snapshots/${id}/cookies`);
   const snap = await api(`/v1/snapshots/${id}`);
   // Main-domain check: the snapshot may only be restored on a page whose
@@ -231,13 +231,14 @@ async function restoreSnapshot(id, { replace = true, backupBefore = true } = {})
     }
   }
 
+  // Always clear the site's cookies first, then write the snapshot.
+  // (Previously this only happened in replace mode; restoring must
+  // never leave stale cookies from another account behind.)
   let removed = 0;
-  if (replace) {
-    const existing = await getAllCookiesForDomain(snap.domain, snap.source_url || undefined);
-    for (const c of existing) {
-      if (await removeCookieRobust(c)) removed++;
-    }
-  }
+  try {
+    const cleared = await clearCookies(snap.domain, snap.source_url || undefined);
+    removed = cleared.removed;
+  } catch { /* best effort; continue to restore */ }
 
   let ok = 0, failed = 0;
   const failures = [];
