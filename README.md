@@ -52,6 +52,9 @@ Windows（PowerShell）：
 
 ```powershell
 irm https://raw.githubusercontent.com/deepseekretro/cookievault/master/scripts/download-extension.ps1 | iex
+# 自动检测本机 Edge：安装路径（注册表 App Paths / Program Files）、User Data、Profile、Extensions 目录
+# 加 -LaunchBrowser 可直接用检测到的 Edge 打开 edge://extensions/
+.\scripts\download-extension.ps1 -LaunchBrowser
 ```
 
 脚本会下载最新 Release 的 `cookievault-extension.zip`（无 Release 时自动回退到源码压缩包），解压到：
