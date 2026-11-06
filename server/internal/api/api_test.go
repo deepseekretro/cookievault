@@ -42,6 +42,37 @@ func doReq(t *testing.T, srv *Server, method, path, token string, body any) (int
 	return rec.Code, out
 }
 
+func TestAllowedHostsGuard(t *testing.T) {
+	srv, _ := setupServer(t)
+	// Loopback is always allowed.
+	code, _ := doReq(t, srv, "GET", "/v1/health", "", nil)
+	if code != 200 {
+		t.Fatalf("loopback health: %d", code)
+	}
+	// Public host is rejected until configured.
+	req := httptest.NewRequest("GET", "/v1/health", nil)
+	req.Host = "edge02.10w123.com"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("expected 403 for unconfigured host, got %d", rec.Code)
+	}
+	srv.SetAllowedHosts("edge02.10w123.com")
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 after allowing host, got %d", rec.Code)
+	}
+	// Other hosts still rejected.
+	req2 := httptest.NewRequest("GET", "/v1/health", nil)
+	req2.Host = "evil.example"
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req2)
+	if rec2.Code != 403 {
+		t.Fatalf("expected 403 for evil host, got %d", rec2.Code)
+	}
+}
+
 func TestCompareAndSingleExport(t *testing.T) {
 	srv, _ := setupServer(t)
 	code, setup := doReq(t, srv, "POST", "/v1/auth/setup", "", map[string]any{"password": "master-password-1"})

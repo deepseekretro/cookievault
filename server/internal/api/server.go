@@ -36,6 +36,10 @@ type Server struct {
 	Vault   *vaultcrypto.Vault
 	PairCode string
 	PairExp  time.Time
+	// AllowedHosts are extra Host values accepted besides loopback,
+	// for deployments behind a reverse proxy (e.g. OpenResty at
+	// https://edge02.10w123.com/cookievault/). Empty = loopback only.
+	AllowedHosts map[string]bool
 
 	mu          sync.Mutex
 	unlockFails int
@@ -52,7 +56,17 @@ func (s *Server) LastActivity() int64 { return s.lastActivity.Load() }
 
 // New creates a Server. pairCode is printed to the log at startup.
 func New(st *store.Store, v *vaultcrypto.Vault, pairCode string) *Server {
-	return &Server{Store: st, Vault: v, PairCode: pairCode, PairExp: time.Now().Add(5 * time.Minute)}
+	return &Server{Store: st, Vault: v, PairCode: pairCode, PairExp: time.Now().Add(5 * time.Minute), AllowedHosts: map[string]bool{}}
+}
+
+// SetAllowedHosts sets extra accepted Host values (comma-separated).
+func (s *Server) SetAllowedHosts(list string) {
+	for _, h := range strings.Split(list, ",") {
+		h = strings.TrimSpace(strings.ToLower(h))
+		if h != "" {
+			s.AllowedHosts[h] = true
+		}
+	}
 }
 
 // Handler returns the root handler with guards applied.
@@ -82,19 +96,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/settings", s.requireToken(s.settingsPost))
 	mux.HandleFunc("POST /v1/backup/export", s.requireToken(s.requireUnlocked(s.backupExport)))
 	mux.HandleFunc("POST /v1/backup/import", s.requireToken(s.requireUnlocked(s.backupImport)))
-	return guard(mux)
+	return s.guard(mux)
 }
 
 // --- guards ---------------------------------------------------------------
 
-func guard(next http.Handler) http.Handler {
+func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Host must be loopback.
+		// Host must be loopback or a configured allowed host (reverse proxy).
 		host, _, err := net.SplitHostPort(r.Host)
 		if err != nil {
 			host = r.Host
 		}
-		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		host = strings.ToLower(host)
+		if host != "127.0.0.1" && host != "localhost" && host != "::1" && !s.AllowedHosts[host] {
 			writeErr(w, http.StatusForbidden, "host_not_allowed")
 			return
 		}

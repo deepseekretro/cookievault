@@ -224,7 +224,6 @@ $('sort').addEventListener('change', () => loadSnapshots(true));
 $('filter-current-domain').addEventListener('change', () => loadSnapshots(true));
 $('error-retry').addEventListener('click', () => loadSnapshots(true));
 $('to-top').addEventListener('click', () => $('scroll').scrollTo({ top: 0, behavior: 'smooth' }));
-$('goto-unlock').addEventListener('click', () => chrome.runtime.openOptionsPage());
 
 // ---------- save current ----------
 $('save-btn').addEventListener('click', () => $('save-row').classList.toggle('hidden'));
@@ -430,6 +429,148 @@ async function exportSnapshot(snap) {
   } catch (e) { toast('导出失败：' + e.message); }
 }
 $('export-btn').addEventListener('click', () => state.detailSnapshot && exportSnapshot(state.detailSnapshot));
+
+// ---------- tabs (数据 / 设置) ----------
+document.querySelectorAll('.tab').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b === btn));
+    const isSettings = btn.dataset.tab === 'settings';
+    $('tab-data').classList.toggle('hidden', isSettings);
+    $('tab-settings').classList.toggle('hidden', !isSettings);
+    if (isSettings) refreshSettingsTab();
+    else snapList.render();
+  });
+});
+
+// ---------- settings tab ----------
+function setMsg(t) { $('set-msg').textContent = t; }
+
+async function refreshSettingsTab() {
+  try {
+    const s = await chrome.storage.local.get(['serverUrl']);
+    $('set-serverUrl').value = s.serverUrl || 'http://127.0.0.1:18765';
+  } catch { /* ignore */ }
+  try {
+    const st = await api('/v1/auth/status');
+    $('set-status').textContent = st.initialized
+      ? (st.unlocked ? '已初始化 · 已解锁' : '已初始化 · 已锁定')
+      : '未初始化：请设置主密码';
+    $('set-setup-box').style.display = st.initialized ? 'none' : 'block';
+    $('set-unlock-box').style.display = st.initialized ? 'block' : 'none';
+    $('set-change-box').style.display = st.initialized ? 'block' : 'none';
+    $('set-conn-status').textContent = '已连接';
+  } catch (e) {
+    $('set-status').textContent = '无法连接服务端：' + e.message;
+    $('set-conn-status').textContent = '';
+    return;
+  }
+  try {
+    const cfg = await api('/v1/settings');
+    $('set-idle-minutes').value = cfg.idle_lock_minutes;
+  } catch { /* ignore */ }
+  try {
+    const local = await chrome.storage.local.get(['autoBackupBeforeLock']);
+    $('set-auto-backup-before-lock').checked = local.autoBackupBeforeLock !== false;
+  } catch { /* ignore */ }
+}
+
+async function saveServerUrl() {
+  const url = $('set-serverUrl').value.trim().replace(/\/$/, '');
+  if (url) await chrome.storage.local.set({ serverUrl: url });
+  return url;
+}
+
+$('set-pair').addEventListener('click', async () => {
+  await saveServerUrl();
+  const code = $('set-pairCode').value.trim();
+  if (!code) { setMsg('请输入配对码（服务端日志里有）'); return; }
+  try {
+    const data = await api('/v1/pair/verify', { method: 'POST', body: { code } });
+    await chrome.storage.local.set({ token: data.token });
+    setMsg('连接成功，Token 已保存');
+    refreshSettingsTab();
+    loadSnapshots(true);
+  } catch (e) { setMsg('配对失败：' + e.message); }
+});
+
+$('set-setup').addEventListener('click', async () => {
+  await saveServerUrl();
+  try {
+    const data = await api('/v1/auth/setup', { method: 'POST', body: { password: $('set-setup-pw').value } });
+    if (data.token) await chrome.storage.local.set({ token: data.token });
+    setMsg('主密码已设置并解锁；如未配对，请用服务端日志的配对码连接');
+    refreshSettingsTab();
+  } catch (e) { setMsg('设置失败：' + e.message); }
+});
+
+$('set-unlock').addEventListener('click', async () => {
+  await saveServerUrl();
+  try { await api('/v1/auth/unlock', { method: 'POST', body: { password: $('set-unlock-pw').value } }); setMsg('已解锁'); refreshSettingsTab(); loadSnapshots(true); }
+  catch (e) { setMsg('解锁失败：' + e.message); }
+});
+
+$('set-lock').addEventListener('click', async () => {
+  // Pre-lock auto-backup (same behaviour as the options page).
+  const s = await chrome.storage.local.get(['autoBackupBeforeLock']);
+  if (s.autoBackupBeforeLock !== false) {
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
+      if (tab?.url) {
+        const domain = new URL(tab.url).hostname;
+        if (domain) {
+          const r = await chrome.runtime.sendMessage({ type: 'SAVE', payload: { label: `手动锁定前自动备份 ${new Date().toLocaleString()}`, note: 'auto-backup before manual lock', domain, sourceUrl: tab.url } });
+          if (r.ok) setMsg(`锁定前已自动备份当前域名（${r.snapshot.cookie_count} 个 Cookie）`);
+        }
+      }
+    } catch { /* best effort */ }
+  }
+  try { await api('/v1/auth/lock', { method: 'POST' }); setMsg(($('set-msg').textContent || '') + ' · 已锁定'); refreshSettingsTab(); loadSnapshots(true); }
+  catch (e) { setMsg('锁定失败：' + e.message); }
+});
+
+$('set-change').addEventListener('click', async () => {
+  try { await api('/v1/auth/change-password', { method: 'POST', body: { old_password: $('set-old-pw').value, new_password: $('set-new-pw').value } }); setMsg('主密码已修改'); }
+  catch (e) { setMsg('修改失败：' + e.message); }
+});
+
+$('set-save-settings').addEventListener('click', async () => {
+  try {
+    const data = await api('/v1/settings', { method: 'POST', body: { idle_lock_minutes: Number($('set-idle-minutes').value || 0) } });
+    await chrome.storage.local.set({ autoBackupBeforeLock: $('set-auto-backup-before-lock').checked });
+    setMsg(`已保存：闲置 ${data.idle_lock_minutes} 分钟自动锁定`);
+  } catch (e) { setMsg('保存设置失败：' + e.message); }
+});
+
+$('set-export').addEventListener('click', async () => {
+  const pw = $('set-backup-pw').value;
+  if (!pw || pw.length < 8) { $('set-backup-status').textContent = '备份密码至少 8 位'; return; }
+  try {
+    $('set-backup-status').textContent = '导出中…';
+    const data = await api('/v1/backup/export', { method: 'POST', body: { backup_password: pw } });
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `cookievault-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    $('set-backup-status').textContent = '已导出（文件已加密）';
+  } catch (e) { $('set-backup-status').textContent = '导出失败：' + e.message; }
+});
+
+$('set-import').addEventListener('click', async () => {
+  const file = $('set-import-file').files[0];
+  const pw = $('set-backup-pw').value;
+  if (!file) { $('set-backup-status').textContent = '先选择备份文件'; return; }
+  if (!pw || pw.length < 8) { $('set-backup-status').textContent = '备份密码至少 8 位'; return; }
+  try {
+    $('set-backup-status').textContent = '导入中…';
+    const data = JSON.parse(await file.text());
+    const res = await api('/v1/backup/import', { method: 'POST', body: { backup_password: pw, data } });
+    $('set-backup-status').textContent = `导入完成：快照 ${res.imported_snapshots}，Cookie ${res.imported_cookies}，跳过重复 ${res.skipped}`;
+    loadSnapshots(true);
+  } catch (e) { $('set-backup-status').textContent = '导入失败：' + e.message; }
+});
 
 // ---------- init ----------
 (async function init() {

@@ -7,7 +7,13 @@
 <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
-  <!-- ======== List view ======== -->
+  <nav class="tabbar">
+    <button class="tab active" data-tab="data">数据</button>
+    <button class="tab" data-tab="settings">设置</button>
+  </nav>
+
+  <!-- ======== Tab: 数据 ======== -->
+  <div id="tab-data">
   <div id="view-list">
     <header class="topbar">
       <div class="search-row">
@@ -41,9 +47,7 @@
     </header>
 
     <div id="locked-banner" class="banner hidden">
-      🔒 服务端已锁定，请先在
-      <button id="goto-unlock" class="link-btn">设置页解锁</button>
-      或在服务端输入主密码。
+      🔒 服务端已锁定，请到「设置」Tab 解锁。
     </div>
     <div id="error-banner" class="banner error hidden">
       <span id="error-text"></span>
@@ -90,6 +94,61 @@
         <div id="cookie-window" class="window"></div>
       </div>
       <div id="cookie-status" class="list-status"></div>
+    </main>
+  </div>
+  </div><!-- /tab-data -->
+
+  <!-- ======== Tab: 设置 ======== -->
+  <div id="tab-settings" class="hidden">
+    <main class="settings-scroll">
+      <section class="panel-card">
+        <h3>服务端连接</h3>
+        <label>服务端地址
+          <input id="set-serverUrl" placeholder="http://127.0.0.1:18765 或 https://edge02.10w123.com/cookievault" /></label>
+        <label>配对码（服务端启动日志里，5 分钟有效）
+          <input id="set-pairCode" placeholder="8 位数字" /></label>
+        <button id="set-pair" class="btn primary small">用配对码连接</button>
+        <span id="set-conn-status" class="muted"></span>
+      </section>
+
+      <section class="panel-card">
+        <h3>主密码（加密密钥）</h3>
+        <div id="set-status" class="muted">状态查询中…</div>
+        <div id="set-setup-box">
+          <label>首次使用：设置主密码（至少 8 位）<input id="set-setup-pw" type="password" /></label>
+          <button id="set-setup" class="btn primary small">设置主密码并解锁</button>
+        </div>
+        <div id="set-unlock-box">
+          <label>解锁<input id="set-unlock-pw" type="password" /></label>
+          <button id="set-unlock" class="btn primary small">解锁</button>
+          <button id="set-lock" class="btn small">锁定</button>
+        </div>
+        <div id="set-change-box">
+          <label>改主密码 — 旧密码<input id="set-old-pw" type="password" /></label>
+          <label>新密码<input id="set-new-pw" type="password" /></label>
+          <button id="set-change" class="btn small">修改主密码</button>
+        </div>
+        <p class="muted">主密码遗忘 = 数据不可恢复。</p>
+      </section>
+
+      <section class="panel-card">
+        <h3>闲置自动锁定</h3>
+        <label>无操作分钟数（0 = 禁用）<input id="set-idle-minutes" type="number" min="0" /></label>
+        <label class="check"><input type="checkbox" id="set-auto-backup-before-lock" /> 锁定前自动备份当前域名 Cookie</label>
+        <button id="set-save-settings" class="btn primary small">保存设置</button>
+      </section>
+
+      <section class="panel-card">
+        <h3>加密备份</h3>
+        <label>备份密码（至少 8 位）<input id="set-backup-pw" type="password" /></label>
+        <button id="set-export" class="btn small">导出备份文件</button>
+        <hr />
+        <label>导入备份文件<input id="set-import-file" type="file" accept=".json,application/json" /></label>
+        <button id="set-import" class="btn small">导入备份</button>
+        <span id="set-backup-status" class="muted"></span>
+      </section>
+
+      <div id="set-msg" class="muted"></div>
     </main>
   </div>
 

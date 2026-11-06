@@ -20,6 +20,8 @@ import (
 func main() {
 	addr := flag.String("addr", "127.0.0.1:18765", "listen address (loopback only)")
 	dataDir := flag.String("data-dir", envOr("COOKIEVAULT_DATA_DIR", "data"), "directory for SQLite DB")
+	allowedHosts := flag.String("allowed-hosts", envOr("COOKIEVAULT_ALLOWED_HOSTS", ""),
+		"comma-separated extra Host values to accept (reverse proxy / public domain), e.g. edge02.10w123.com")
 	flag.Parse()
 
 	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
@@ -35,6 +37,7 @@ func main() {
 	pairCode := genPairCode()
 	v := &vaultcrypto.Vault{}
 	srv := api.New(st, v, pairCode)
+	srv.SetAllowedHosts(*allowedHosts)
 
 	init, _ := st.Initialized()
 	log.Printf("cookievault listening on %s (db: %s, initialized=%v)", *addr, dbPath, init)

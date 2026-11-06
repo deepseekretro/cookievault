@@ -88,6 +88,10 @@ cd ../extension && node --check background.js sidepanel.js popup.js options.js
 
 维护者发布 Release 前先打包：`scripts/package-extension.sh`（或 `.ps1`）生成 `cookievault-extension.zip` 附到 Release，一键脚本会优先下载它。
 
+## 部署到 OpenResty 虚拟目录
+
+Go 服务可部署在 `https://edge02.10w123.com/cookievault/` 下（OpenResty 反代到本机 18765），扩展在侧边栏「设置」Tab 里把服务端地址填为该 URL 即可。详见 [deploy/README.md](deploy/README.md)。
+
 ## P3 已实现
 
 - **Profile 分组浏览**：侧边栏按 Profile 筛选/新建分组，保存时可归入分组，卡片显示分组名

@@ -1,0 +1,21 @@
+[Unit]
+Description=CookieVault server (browser cookie vault, Go)
+After=network.target
+
+[Service]
+Type=simple
+# Dedicated system user (create with: useradd -r -s /usr/sbin/nologin cookievault)
+User=cookievault
+Group=cookievault
+ExecStart=/usr/local/bin/cookievault-server -addr 127.0.0.1:18765 -data-dir /var/lib/cookievault -allowed-hosts edge02.10w123.com
+Restart=always
+RestartSec=3
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/cookievault
+
+[Install]
+WantedBy=multi-user.target
