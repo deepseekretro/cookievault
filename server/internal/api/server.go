@@ -71,6 +71,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/profiles/{id}", s.requireToken(s.requireUnlocked(s.profileDelete)))
 	mux.HandleFunc("POST /v1/snapshots", s.requireToken(s.requireUnlocked(s.snapshotCreate)))
 	mux.HandleFunc("GET /v1/snapshots", s.requireToken(s.requireUnlocked(s.snapshotList)))
+	mux.HandleFunc("GET /v1/snapshots/compare", s.requireToken(s.requireUnlocked(s.snapshotCompare)))
+	mux.HandleFunc("POST /v1/snapshots/{id}/export", s.requireToken(s.requireUnlocked(s.snapshotExport)))
 	mux.HandleFunc("GET /v1/snapshots/{id}", s.requireToken(s.requireUnlocked(s.snapshotGet)))
 	mux.HandleFunc("PATCH /v1/snapshots/{id}", s.requireToken(s.requireUnlocked(s.snapshotUpdate)))
 	mux.HandleFunc("GET /v1/snapshots/{id}/cookies", s.requireToken(s.requireUnlocked(s.snapshotCookies)))
@@ -739,37 +741,24 @@ type backupContainer struct {
 	KDF        vaultcrypto.PasswordEncrypted `json:"kdf"`
 }
 
-func (s *Server) backupExport(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		BackupPassword string `json:"backup_password"`
-	}
-	if err := decodeJSON(r, &req); err != nil || len(req.BackupPassword) < 8 {
-		writeErr(w, http.StatusBadRequest, "backup_password_too_short")
-		return
-	}
+// buildPlain assembles the decryptable backup payload for the given
+// snapshots, including their profiles.
+func (s *Server) buildPlain(snaps []store.Snapshot) (backupPlain, error) {
 	profiles, err := s.Store.ProfileList()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "storage_error")
-		return
+		return backupPlain{}, err
 	}
-	snaps, err := s.Store.SnapshotAll()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "storage_error")
-		return
-	}
-	plain := backupPlain{Version: 1, ExportedAt: time.Now().Unix(), Profiles: profiles}
+	plain := backupPlain{Version: 1, ExportedAt: time.Now().Unix(), Profiles: profiles, Snapshots: []backupSnapshot{}}
 	for _, snap := range snaps {
 		stored, err := s.Store.SnapshotCookies(snap.ID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "storage_error")
-			return
+			return backupPlain{}, err
 		}
-		bs := backupSnapshot{Snapshot: snap}
+		bs := backupSnapshot{Snapshot: snap, Cookies: []store.CookieInput{}}
 		for _, c := range stored {
 			val, err := s.Vault.Decrypt(c.Nonce, c.ValueEnc)
 			if err != nil {
-				writeErr(w, http.StatusInternalServerError, "decrypt_error")
-				return
+				return backupPlain{}, err
 			}
 			ci := store.CookieInput{
 				Name: c.Name, Value: val, Domain: c.Domain, HostOnly: c.HostOnly,
@@ -782,26 +771,180 @@ func (s *Server) backupExport(w http.ResponseWriter, r *http.Request) {
 			}
 			bs.Cookies = append(bs.Cookies, ci)
 		}
-		if bs.Cookies == nil {
-			bs.Cookies = []store.CookieInput{}
-		}
 		plain.Snapshots = append(plain.Snapshots, bs)
 	}
-	if plain.Snapshots == nil {
-		plain.Snapshots = []backupSnapshot{}
-	}
+	return plain, nil
+}
+
+func (s *Server) writeEncryptedBackup(w http.ResponseWriter, plain backupPlain, password, auditSnapID, auditAction string) {
 	raw, err := json.Marshal(plain)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "encode_error")
 		return
 	}
-	enc, err := vaultcrypto.EncryptWithPassword(req.BackupPassword, raw)
+	enc, err := vaultcrypto.EncryptWithPassword(password, raw)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "crypto_error")
 		return
 	}
-	s.Store.Audit("backup_export", "", fmt.Sprintf("%d snapshots", len(plain.Snapshots)), time.Now())
+	s.Store.Audit(auditAction, auditSnapID, fmt.Sprintf("%d snapshots", len(plain.Snapshots)), time.Now())
 	writeJSON(w, http.StatusOK, backupContainer{Version: 1, KDF: *enc})
+}
+
+func (s *Server) backupExport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BackupPassword string `json:"backup_password"`
+	}
+	if err := decodeJSON(r, &req); err != nil || len(req.BackupPassword) < 8 {
+		writeErr(w, http.StatusBadRequest, "backup_password_too_short")
+		return
+	}
+	snaps, err := s.Store.SnapshotAll()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	plain, err := s.buildPlain(snaps)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	s.writeEncryptedBackup(w, plain, req.BackupPassword, "", "backup_export")
+}
+
+// snapshotExport exports a single snapshot as an encrypted backup package
+// (same format as backupExport, so it can be imported with /backup/import).
+func (s *Server) snapshotExport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BackupPassword string `json:"backup_password"`
+	}
+	if err := decodeJSON(r, &req); err != nil || len(req.BackupPassword) < 8 {
+		writeErr(w, http.StatusBadRequest, "backup_password_too_short")
+		return
+	}
+	snap, ok, err := s.Store.SnapshotGet(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	plain, err := s.buildPlain([]store.Snapshot{snap})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	s.writeEncryptedBackup(w, plain, req.BackupPassword, snap.ID, "snapshot_export")
+}
+
+// --- snapshot compare ---------------------------------------------------------
+//
+// Compares two snapshots cookie-by-cookie. Returns only cookie identity
+// and which fields changed — never cookie values.
+
+type diffCookie struct {
+	Name   string   `json:"name"`
+	Domain string   `json:"domain"`
+	Path   string   `json:"path"`
+	Fields []string `json:"fields,omitempty"` // for changed entries
+}
+
+func cookieIdentity(c store.CookieInput) string {
+	return c.Name + "\x00" + c.Domain + "\x00" + c.Path + "\x00" + c.PartitionKey
+}
+
+func (s *Server) decryptedCookies(id string) (map[string]store.CookieInput, error) {
+	stored, err := s.Store.SnapshotCookies(id)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]store.CookieInput{}
+	for _, c := range stored {
+		val, err := s.Vault.Decrypt(c.Nonce, c.ValueEnc)
+		if err != nil {
+			return nil, err
+		}
+		ci := store.CookieInput{
+			Name: c.Name, Value: val, Domain: c.Domain, HostOnly: c.HostOnly,
+			Path: c.Path, Secure: c.Secure, HTTPOnly: c.HTTPOnly,
+			SameSite: c.SameSite, PartitionKey: c.PartitionKey, Partitioned: c.Partitioned,
+		}
+		if c.ExpiresAt != nil {
+			v := float64(*c.ExpiresAt)
+			ci.ExpirationDate = &v
+		}
+		out[cookieIdentity(ci)] = ci
+	}
+	return out, nil
+}
+
+func (s *Server) snapshotCompare(w http.ResponseWriter, r *http.Request) {
+	aID, bID := r.URL.Query().Get("a"), r.URL.Query().Get("b")
+	if aID == "" || bID == "" || aID == bID {
+		writeErr(w, http.StatusBadRequest, "a_and_b_required")
+		return
+	}
+	aSnap, okA, _ := s.Store.SnapshotGet(aID)
+	bSnap, okB, _ := s.Store.SnapshotGet(bID)
+	if !okA || !okB {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	aMap, err := s.decryptedCookies(aID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "decrypt_error")
+		return
+	}
+	bMap, err := s.decryptedCookies(bID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "decrypt_error")
+		return
+	}
+	added := []diffCookie{}
+	removed := []diffCookie{}
+	changed := []diffCookie{}
+	unchanged := 0
+	for key, b := range bMap {
+		a, inA := aMap[key]
+		if !inA {
+			added = append(added, diffCookie{Name: b.Name, Domain: b.Domain, Path: b.Path})
+			continue
+		}
+		var fields []string
+		if a.Value != b.Value {
+			fields = append(fields, "value")
+		}
+		if a.Secure != b.Secure {
+			fields = append(fields, "secure")
+		}
+		if a.HTTPOnly != b.HTTPOnly {
+			fields = append(fields, "httpOnly")
+		}
+		if !strings.EqualFold(a.SameSite, b.SameSite) {
+			fields = append(fields, "sameSite")
+		}
+		if a.HostOnly != b.HostOnly {
+			fields = append(fields, "hostOnly")
+		}
+		if len(fields) > 0 {
+			changed = append(changed, diffCookie{Name: b.Name, Domain: b.Domain, Path: b.Path, Fields: fields})
+		} else {
+			unchanged++
+		}
+	}
+	for key, a := range aMap {
+		if _, inB := bMap[key]; !inB {
+			removed = append(removed, diffCookie{Name: a.Name, Domain: a.Domain, Path: a.Path})
+		}
+	}
+	s.Store.Audit("snapshot_compare", aID, "vs "+bID, time.Now())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"a": map[string]any{"id": aSnap.ID, "label": aSnap.Label, "domain": aSnap.Domain, "cookie_count": aSnap.CookieCount},
+		"b": map[string]any{"id": bSnap.ID, "label": bSnap.Label, "domain": bSnap.Domain, "cookie_count": bSnap.CookieCount},
+		"added": added, "removed": removed, "changed": changed, "unchanged": unchanged,
+	})
 }
 
 func (s *Server) backupImport(w http.ResponseWriter, r *http.Request) {

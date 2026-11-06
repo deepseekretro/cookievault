@@ -16,6 +16,10 @@
         <button id="search-clear" class="icon-btn hidden" title="清除搜索">✕</button>
       </div>
       <div class="filter-row">
+        <label class="chip">分组
+          <select id="filter-profile"><option value="">全部 Profile</option></select>
+        </label>
+        <button id="new-profile" class="btn small" title="新建 Profile">＋</button>
         <label class="chip"><input type="checkbox" id="filter-current-domain" /> 仅当前域名</label>
         <label class="chip">排序
           <select id="sort">
@@ -30,6 +34,7 @@
       <div id="save-row" class="save-row hidden">
         <input id="save-label" type="text" placeholder="账号标签 *（如 张三-工作账号）" />
         <input id="save-note" type="text" placeholder="备注（可选）" />
+        <select id="save-profile"><option value="">不分组</option></select>
         <button id="save-confirm" class="btn primary small">保存</button>
         <button id="save-cancel" class="btn small">取消</button>
       </div>
@@ -69,6 +74,8 @@
           <span id="detail-meta" class="muted"></span>
         </div>
         <button id="restore-btn" class="btn primary small">恢复此快照</button>
+        <button id="compare-btn" class="btn small">对比</button>
+        <button id="export-btn" class="btn small">导出</button>
       </div>
       <div class="search-row">
         <span class="search-icon">🔍</span>
@@ -94,6 +101,22 @@
       <div class="modal-actions">
         <button id="modal-cancel" class="btn">取消</button>
         <button id="modal-ok" class="btn primary">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======== Compare modal ======== -->
+  <div id="compare-modal" class="modal hidden">
+    <div class="modal-card" style="max-width:460px">
+      <div class="modal-title">快照对比</div>
+      <div class="modal-body">
+        <div id="compare-base" class="muted" style="margin-bottom:6px"></div>
+        <label>与之对比：<select id="compare-target" style="width:100%;margin-top:4px"></select></label>
+        <div id="compare-result" style="margin-top:10px;max-height:300px;overflow:auto"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="compare-close" class="btn">关闭</button>
+        <button id="compare-run" class="btn primary">开始对比</button>
       </div>
     </div>
   </div>

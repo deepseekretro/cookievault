@@ -77,7 +77,39 @@ const state = {
   currentDomain: '',
   detailSnapshot: null,
   cookies: [],
+  profiles: [],
+  profileNames: new Map(),
 };
+
+async function loadProfiles() {
+  try {
+    const data = await api('/v1/profiles');
+    state.profiles = data.items || [];
+  } catch { state.profiles = []; }
+  state.profileNames = new Map(state.profiles.map((p) => [p.id, p.name]));
+  const filterSel = $('filter-profile');
+  const saveSel = $('save-profile');
+  const curFilter = filterSel.value;
+  const curSave = saveSel.value;
+  filterSel.innerHTML = '<option value="">全部 Profile</option>' +
+    state.profiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  saveSel.innerHTML = '<option value="">不分组</option>' +
+    state.profiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  filterSel.value = curFilter;
+  saveSel.value = curSave;
+}
+$('filter-profile').addEventListener('change', () => loadSnapshots(true));
+$('new-profile').addEventListener('click', async () => {
+  const name = prompt('Profile 名称（如 工作 / 个人）');
+  if (!name || !name.trim()) return;
+  try {
+    const p = await api('/v1/profiles', { method: 'POST', body: { name: name.trim() } });
+    await loadProfiles();
+    $('filter-profile').value = p.id;
+    toast(`已创建 Profile「${p.name}」`);
+    loadSnapshots(true);
+  } catch (e) { toast('创建 Profile 失败：' + e.message); }
+});
 
 const snapList = new VirtualList({
   scrollEl: $('scroll'), spacerEl: $('spacer'), windowEl: $('window'),
@@ -89,15 +121,19 @@ const snapList = new VirtualList({
     card.innerHTML = `
       <div class="row1"><span class="label">${highlight(snap.label, q)}</span>
         <span class="muted">${snap.cookie_count} 个 Cookie</span></div>
-      <div class="row2"><span>${highlight(snap.domain, q)} · ${timeAgo(snap.last_used_at)}</span>
+      <div class="row2"><span>${state.profileNames.get(snap.profile_id) ? esc(state.profileNames.get(snap.profile_id)) + ' · ' : ''}${highlight(snap.domain, q)} · ${timeAgo(snap.last_used_at)}</span>
         <span class="actions">
           <button class="btn small primary" data-act="restore">恢复</button>
+          <button class="btn small" data-act="compare">对比</button>
+          <button class="btn small" data-act="export">导出</button>
           <button class="btn small" data-act="rename">改名</button>
           <button class="btn small danger" data-act="delete">删除</button>
         </span></div>`;
     card.addEventListener('click', (e) => {
       const act = e.target.closest('[data-act]')?.dataset.act;
       if (act === 'restore') { e.stopPropagation(); openDetail(snap, true); return; }
+      if (act === 'compare') { e.stopPropagation(); openCompare(snap); return; }
+      if (act === 'export') { e.stopPropagation(); exportSnapshot(snap); return; }
       if (act === 'rename') { e.stopPropagation(); renameSnapshot(snap); return; }
       if (act === 'delete') { e.stopPropagation(); deleteSnapshot(snap); return; }
       openDetail(snap, false);
@@ -128,6 +164,7 @@ async function loadSnapshots(reset) {
     });
     const q = $('search').value.trim();
     if (q) params.set('q', q);
+    if ($('filter-profile').value) params.set('profile_id', $('filter-profile').value);
     if ($('filter-current-domain').checked && state.currentDomain) params.set('domain', state.currentDomain);
     if (state.cursor) params.set('cursor', state.cursor);
 
@@ -201,7 +238,7 @@ $('save-confirm').addEventListener('click', async () => {
     const url = new URL(tab.url);
     const r = await chrome.runtime.sendMessage({
       type: 'SAVE',
-      payload: { label, note: $('save-note').value.trim(), domain: url.hostname, sourceUrl: url.href },
+      payload: { label, note: $('save-note').value.trim(), domain: url.hostname, sourceUrl: url.href, profileId: $('save-profile').value },
     });
     if (!r.ok) throw new Error(r.error);
     toast(`已保存「${label}」（${r.snapshot.cookie_count} 个 Cookie）`);
@@ -346,6 +383,54 @@ $('restore-replace').addEventListener('change', async () => {
   } catch (e) { toast('保存模式偏好失败：' + e.message); }
 });
 
+// ---------- compare & single export ----------
+function openCompare(snap) {
+  state.detailSnapshot = snap;
+  $('compare-base').textContent = `基准：${snap.label}（${snap.domain}）`;
+  const others = state.items.filter((i) => i.id !== snap.id);
+  $('compare-target').innerHTML = others.length
+    ? others.map((i) => `<option value="${esc(i.id)}">${esc(i.label)} (${esc(i.domain)})</option>`).join('')
+    : '<option value="">（当前列表没有其他快照）</option>';
+  $('compare-result').innerHTML = '';
+  $('compare-modal').classList.remove('hidden');
+}
+$('compare-btn').addEventListener('click', () => state.detailSnapshot && openCompare(state.detailSnapshot));
+$('compare-close').addEventListener('click', () => $('compare-modal').classList.add('hidden'));
+$('compare-run').addEventListener('click', async () => {
+  const base = state.detailSnapshot;
+  const targetId = $('compare-target').value;
+  if (!base || !targetId) return;
+  $('compare-result').textContent = '对比中…';
+  try {
+    const d = await api(`/v1/snapshots/compare?a=${encodeURIComponent(base.id)}&b=${encodeURIComponent(targetId)}`);
+    const fmt = (arr, fields) => arr.length
+      ? '<div>' + arr.map((c) => `<div>· ${esc(c.name)} <span class="muted">${esc(c.domain)}${c.path}</span>${fields && c.fields ? ` <span class="muted">（变化：${esc(c.fields.join(', '))}）</span>` : ''}</div>`).join('') + '</div>'
+      : '<div class="muted">无</div>';
+    $('compare-result').innerHTML = `
+      <div class="muted">${esc(d.a.label)} → ${esc(d.b.label)}：新增 ${d.added.length}，删除 ${d.removed.length}，变化 ${d.changed.length}，未变 ${d.unchanged}</div>
+      <div style="margin-top:8px"><strong>新增（仅对比方有）</strong>${fmt(d.added)}</div>
+      <div style="margin-top:8px"><strong>删除（仅基准有）</strong>${fmt(d.removed)}</div>
+      <div style="margin-top:8px"><strong>变化（值/属性）</strong>${fmt(d.changed, true)}</div>`;
+  } catch (e) { $('compare-result').textContent = '对比失败：' + e.message; }
+});
+
+async function exportSnapshot(snap) {
+  const pw = prompt(`导出「${snap.label}」\n请输入备份密码（至少 8 位）`);
+  if (!pw) return;
+  if (pw.length < 8) { toast('备份密码至少 8 位'); return; }
+  try {
+    const data = await api(`/v1/snapshots/${snap.id}/export`, { method: 'POST', body: { backup_password: pw } });
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `cookievault-${snap.label}-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('已导出加密快照包');
+  } catch (e) { toast('导出失败：' + e.message); }
+}
+$('export-btn').addEventListener('click', () => state.detailSnapshot && exportSnapshot(state.detailSnapshot));
+
 // ---------- init ----------
 (async function init() {
   try {
@@ -354,5 +439,6 @@ $('restore-replace').addEventListener('change', async () => {
       try { state.currentDomain = new URL(tabs[0].url).hostname; } catch { /* ignore */ }
     }
   } catch { /* tabs permission may be absent */ }
+  await loadProfiles();
   loadSnapshots(true);
 })();

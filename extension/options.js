@@ -65,7 +65,25 @@ $('unlock').onclick = async () => {
   catch (e) { msg('解锁失败：' + e.message); }
 };
 $('lock').onclick = async () => {
-  try { await rawApi('/v1/auth/lock', { method: 'POST' }); msg('已锁定'); refresh(); }
+  // Pre-lock auto-backup: save the active tab's cookies first (best effort).
+  const s = await chrome.storage.local.get(['autoBackupBeforeLock']);
+  if (s.autoBackupBeforeLock !== false) {
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
+      if (tab?.url) {
+        const domain = new URL(tab.url).hostname;
+        if (domain) {
+          const r = await chrome.runtime.sendMessage({
+            type: 'SAVE',
+            payload: { label: `手动锁定前自动备份 ${new Date().toLocaleString()}`, note: 'auto-backup before manual lock', domain, sourceUrl: tab.url },
+          });
+          if (r.ok) msg(`锁定前已自动备份当前域名（${r.snapshot.cookie_count} 个 Cookie）`);
+        }
+      }
+    } catch { /* best effort */ }
+  }
+  try { await rawApi('/v1/auth/lock', { method: 'POST' }); msg($('msg').textContent + ' · 已锁定'); refresh(); }
   catch (e) { msg('锁定失败：' + e.message); }
 };
 $('change').onclick = async () => {
@@ -76,6 +94,7 @@ $('change').onclick = async () => {
 $('save-settings').onclick = async () => {
   try {
     const data = await rawApi('/v1/settings', { method: 'POST', body: { idle_lock_minutes: Number($('idle-minutes').value || 0) } });
+    await chrome.storage.local.set({ autoBackupBeforeLock: $('auto-backup-before-lock').checked });
     msg(`已保存：闲置 ${data.idle_lock_minutes} 分钟自动锁定`);
   } catch (e) { msg('保存设置失败：' + e.message); }
 };
@@ -114,6 +133,8 @@ async function loadSettings() {
     const s = await rawApi('/v1/settings');
     $('idle-minutes').value = s.idle_lock_minutes;
   } catch { /* ignore */ }
+  const local = await chrome.storage.local.get(['autoBackupBeforeLock']);
+  $('auto-backup-before-lock').checked = local.autoBackupBeforeLock !== false;
 }
 loadSettings();
 refresh();

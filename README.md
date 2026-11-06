@@ -65,6 +65,13 @@ cd server && go vet ./... && go test ./...
 cd ../extension && node --check background.js sidepanel.js popup.js options.js
 ```
 
+## P3 已实现
+
+- **Profile 分组浏览**：侧边栏按 Profile 筛选/新建分组，保存时可归入分组，卡片显示分组名
+- **快照差异对比**：`GET /v1/snapshots/compare?a=&b=` 返回新增/删除/变化（字段级）/未变，只返回 Cookie 标识，不泄露值
+- **单快照加密导出**：`POST /v1/snapshots/{id}/export`，与整库备份同格式，可用备份导入恢复
+- **锁定前自动备份**：插件每分钟监控解锁时长，闲置锁定前 1 分钟自动保存当前域名脏 Cookie；手动锁定时也会先备份（可在设置页关闭）
+
 ## P2 已实现
 
 - **加密备份导入导出**：备份文件用独立备份密码（Argon2id+AES-GCM）整体加密，可跨机器/换主密码导入；导入按指纹去重

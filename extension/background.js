@@ -57,16 +57,43 @@ async function collectCookies(domain, storeId) {
   }));
 }
 
-async function saveSnapshot({ label, note = '', domain, sourceUrl = '', isReplace = true }) {
+async function saveSnapshot({ label, note = '', domain, sourceUrl = '', isReplace = true, profileId = '' }) {
   const cookies = await collectCookies(domain);
   if (!cookies.length) throw new Error('no cookies found for ' + domain);
-  return api('/v1/snapshots', {
+  const snap = await api('/v1/snapshots', {
     method: 'POST',
     body: JSON.stringify({
+      profile_id: profileId || undefined,
       domain, label, note, source_url: sourceUrl,
       is_replace: isReplace, cookies,
     }),
   });
+  await rememberFingerprint(domain, cookies);
+  return snap;
+}
+
+// Local fingerprint of a cookie set, used to detect "dirty" domains for
+// pre-lock auto-backup without querying the server (which would reset
+// its idle timer).
+function fingerprintCookies(cookies) {
+  let h = 5381;
+  const s = cookies.map((c) => `${c.name}\x00${c.domain}\x00${c.path}\x00${c.value}`).sort().join('\x01');
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+
+async function rememberFingerprint(domain, cookies) {
+  const s = await chrome.storage.local.get(['lastFingerprints']);
+  const map = s.lastFingerprints || {};
+  map[domain] = fingerprintCookies(cookies);
+  await chrome.storage.local.set({ lastFingerprints: map });
+}
+
+async function isDirty(domain) {
+  const cookies = await collectCookies(domain);
+  if (!cookies.length) return false;
+  const s = await chrome.storage.local.get(['lastFingerprints']);
+  return (s.lastFingerprints || {})[domain] !== fingerprintCookies(cookies);
 }
 
 function cookieUrl(c) {
@@ -137,11 +164,58 @@ async function restoreSnapshot(id, { replace = true, backupBefore = true } = {})
   }
 
   await api(`/v1/snapshots/${id}/touch`, { method: 'POST' }).catch(() => {});
+  await rememberFingerprint(snap.domain, items).catch(() => {});
   return { restored: ok, failed, removed, backupId, failures };
 }
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.runtime.setUninstallURL('https://example.invalid/cookievault-uninstall');
+  chrome.alarms.create('idleWatch', { periodInMinutes: 1 });
+});
+chrome.runtime.onStartup.addListener(() => chrome.alarms.create('idleWatch', { periodInMinutes: 1 }));
+
+// Pre-lock auto-backup watcher.
+// Every minute, check (via /auth/status, which does NOT reset the server's
+// idle timer) whether the vault has been unlocked for close to the idle
+// limit. If so, back up the active tab's domain when its cookies changed
+// since the last save/restore, before the server locks.
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== 'idleWatch') return;
+  try {
+    const s = await chrome.storage.local.get(['autoBackupBeforeLock', 'firstUnlockedAt']);
+    if (s.autoBackupBeforeLock === false) return; // opt-out
+    const { serverUrl, token } = await getSettings();
+    const status = await (await fetch(serverUrl + '/v1/auth/status')).json();
+    if (!status.unlocked) {
+      await chrome.storage.local.set({ firstUnlockedAt: 0 });
+      return;
+    }
+    const now = Date.now();
+    let first = s.firstUnlockedAt || 0;
+    if (!first) { first = now; await chrome.storage.local.set({ firstUnlockedAt: first }); return; }
+    let idleMinutes = 15;
+    if (token) {
+      try {
+        const r = await fetch(serverUrl + '/v1/settings', { headers: { Authorization: `Bearer ${token}` } });
+        if (r.ok) idleMinutes = (await r.json()).idle_lock_minutes ?? 15;
+      } catch { /* keep default */ }
+    }
+    if (!idleMinutes || idleMinutes <= 0) return;
+    // Back up 60s before the server would auto-lock.
+    if (now - first < idleMinutes * 60 * 1000 - 60 * 1000) return;
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs[0];
+    if (!tab?.url) return;
+    let domain;
+    try { domain = new URL(tab.url).hostname; } catch { return; }
+    if (!domain || !(await isDirty(domain))) return;
+    await saveSnapshot({
+      label: `闲置锁定前自动备份 ${new Date().toLocaleString()}`,
+      note: 'auto-backup before idle lock',
+      domain, sourceUrl: tab.url,
+    });
+    await chrome.storage.local.set({ firstUnlockedAt: 0 });
+  } catch { /* best effort; never crash the worker */ }
 });
 
 // Clicking the toolbar icon opens the side panel.

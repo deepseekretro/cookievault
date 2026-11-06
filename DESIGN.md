@@ -54,6 +54,13 @@ Go 服务端 ── 解密/加密 ──▶ SQLite (value_enc + nonce)
 - **恢复模式**：替换（默认）/合并，每快照 `is_replace` 偏好可 PATCH 持久化。
 - **审计**：snapshot_create/delete/restore_touch/backup_* 写 audit_log，只记元数据。
 
+## P3 增补
+
+- **Profile 分组**：`profile_id` 过滤已在列表接口支持；侧边栏下拉筛选 + 新建，保存时可归组，卡片显示分组名。
+- **快照对比**：`GET /v1/snapshots/compare?a=&b=`，按 (name,domain,path,partition) 对齐，返回 added/removed/changed(字段名)/unchanged，永不返回 Cookie 值。侧边栏卡片/详情有对比入口。
+- **单快照导出**：`POST /v1/snapshots/{id}/export` 复用备份容器格式（buildPlain 单快照），可用 `/backup/import` 恢复，导入去重同样适用。
+- **锁定前自动备份**：插件 background 用 `chrome.alarms` 每分钟轮询 `/auth/status`（该接口不重置服务端闲置计时）；本地记录首次解锁时间，接近 idle 上限（剩 60s）且当前活动域名 Cookie 指纹已变时，自动新建“闲置锁定前自动备份”快照，保存本身会重置服务端计时。手动锁定（设置页）同样先备份。指纹（FNV）在本地计算/存储，不发往服务端。
+
 ## 安全
 - 只绑 loopback；Host/Origin 白名单；自定义 Header + Bearer Token
 - 主密钥只在内存（解锁时），锁定清零；忘记主密码不可恢复
