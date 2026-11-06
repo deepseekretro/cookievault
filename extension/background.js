@@ -96,6 +96,21 @@ async function isDirty(domain) {
   return (s.lastFingerprints || {})[domain] !== fingerprintCookies(cookies);
 }
 
+// Remove every cookie for a domain; returns the number removed.
+async function clearCookies(domain) {
+  const existing = await chrome.cookies.getAll({ domain });
+  let removed = 0;
+  for (const c of existing) {
+    try {
+      const r = await chrome.cookies.remove({ url: cookieUrl(c), name: c.name, storeId: c.storeId });
+      if (r) removed++;
+    } catch { /* best effort */ }
+  }
+  // Make the pre-lock watcher aware the domain is now empty.
+  await rememberFingerprint(domain, []).catch(() => {});
+  return { domain, removed, total: existing.length };
+}
+
 function cookieUrl(c) {
   const host = c.domain.replace(/^\./, '');
   const scheme = c.secure ? 'https' : 'http';
@@ -233,6 +248,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       switch (msg.type) {
         case 'GET_SETTINGS': return sendResponse({ ok: true, settings: await getSettings() });
         case 'SAVE': return sendResponse({ ok: true, snapshot: await saveSnapshot(msg.payload) });
+        case 'CLEAR': return sendResponse({ ok: true, result: await clearCookies(msg.domain) });
         case 'RESTORE': return sendResponse({ ok: true, result: await restoreSnapshot(msg.id, msg.options) });
         case 'API': return sendResponse({ ok: true, data: await api(msg.path, { method: msg.method || 'GET', body: msg.body ? JSON.stringify(msg.body) : undefined }) });
         default: return sendResponse({ ok: false, error: 'unknown message' });

@@ -247,6 +247,24 @@ $('save-confirm').addEventListener('click', async () => {
   } catch (e) { toast('保存失败：' + e.message); }
 });
 
+// ---------- clear current site cookies ----------
+async function clearSiteCookies(domain) {
+  if (!domain) { toast('无法识别当前站点域名'); return; }
+  showModal({
+    title: '清空当前站点 Cookie', danger: true, okText: '清空',
+    body: `确定清空 ${domain} 的全部 Cookie？\n清空后刷新页面即可测试未登录状态，之后再点「恢复」恢复某个快照的登录态。`,
+    onOk: async () => {
+      try {
+        const r = await chrome.runtime.sendMessage({ type: 'CLEAR', domain });
+        if (!r.ok) throw new Error(r.error);
+        toast(`已清空 ${domain} 的 ${r.result.removed} 个 Cookie，请刷新页面测试未登录状态`);
+      } catch (e) { toast('清空失败：' + e.message); }
+    },
+  });
+}
+$('clear-current-btn').addEventListener('click', () => clearSiteCookies(state.currentDomain));
+$('clear-btn').addEventListener('click', () => state.detailSnapshot && clearSiteCookies(state.detailSnapshot.domain));
+
 // ---------- modal ----------
 function showModal({ title, body, okText = '确认', danger = false, onOk }) {
   $('modal-title').textContent = title;
