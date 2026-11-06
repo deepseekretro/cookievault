@@ -96,6 +96,14 @@ async function isDirty(domain) {
   return (s.lastFingerprints || {})[domain] !== fingerprintCookies(cookies);
 }
 
+// Domain of the currently active browser tab (resolved fresh on each call).
+async function getActiveTabDomain() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  if (!tab?.url) return '';
+  try { return new URL(tab.url).hostname; } catch { return ''; }
+}
+
 // Remove every cookie for a domain; returns the number removed.
 async function clearCookies(domain) {
   const existing = await chrome.cookies.getAll({ domain });
@@ -248,7 +256,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       switch (msg.type) {
         case 'GET_SETTINGS': return sendResponse({ ok: true, settings: await getSettings() });
         case 'SAVE': return sendResponse({ ok: true, snapshot: await saveSnapshot(msg.payload) });
-        case 'CLEAR': return sendResponse({ ok: true, result: await clearCookies(msg.domain) });
+        case 'CLEAR': {
+          // Always clear the domain of the page the user is currently
+          // looking at (active tab), not a cached/configured domain.
+          const domain = msg.domain || (await getActiveTabDomain());
+          if (!domain) return sendResponse({ ok: false, error: '无法识别当前标签页的域名' });
+          return sendResponse({ ok: true, result: await clearCookies(domain) });
+        }
         case 'RESTORE': return sendResponse({ ok: true, result: await restoreSnapshot(msg.id, msg.options) });
         case 'API': return sendResponse({ ok: true, data: await api(msg.path, { method: msg.method || 'GET', body: msg.body ? JSON.stringify(msg.body) : undefined }) });
         default: return sendResponse({ ok: false, error: 'unknown message' });

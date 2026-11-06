@@ -248,22 +248,29 @@ $('save-confirm').addEventListener('click', async () => {
 });
 
 // ---------- clear current site cookies ----------
-async function clearSiteCookies(domain) {
-  if (!domain) { toast('无法识别当前站点域名'); return; }
+// Always clears the cookies of the page in the currently active browser
+// tab (resolved fresh in the background at click time), never the
+// configured server address or a snapshot's domain.
+async function clearSiteCookies() {
+  let domain = '';
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tabs[0]?.url) domain = new URL(tabs[0].url).hostname;
+  } catch { /* background will resolve it as a fallback */ }
   showModal({
     title: '清空当前站点 Cookie', danger: true, okText: '清空',
-    body: `确定清空 ${domain} 的全部 Cookie？\n清空后刷新页面即可测试未登录状态，之后再点「恢复」恢复某个快照的登录态。`,
+    body: `确定清空当前标签页所在站点${domain ? `（${domain}）` : ''}的全部 Cookie？\n清空后刷新页面即可测试未登录状态，之后再点「恢复」恢复某个快照的登录态。`,
     onOk: async () => {
       try {
-        const r = await chrome.runtime.sendMessage({ type: 'CLEAR', domain });
+        const r = await chrome.runtime.sendMessage({ type: 'CLEAR', domain: domain || undefined });
         if (!r.ok) throw new Error(r.error);
-        toast(`已清空 ${domain} 的 ${r.result.removed} 个 Cookie，请刷新页面测试未登录状态`);
+        toast(`已清空 ${r.result.domain} 的 ${r.result.removed} 个 Cookie，请刷新页面测试未登录状态`);
       } catch (e) { toast('清空失败：' + e.message); }
     },
   });
 }
-$('clear-current-btn').addEventListener('click', () => clearSiteCookies(state.currentDomain));
-$('clear-btn').addEventListener('click', () => state.detailSnapshot && clearSiteCookies(state.detailSnapshot.domain));
+$('clear-current-btn').addEventListener('click', () => clearSiteCookies());
+$('clear-btn').addEventListener('click', () => clearSiteCookies());
 
 // ---------- modal ----------
 function showModal({ title, body, okText = '确认', danger = false, onOk }) {
