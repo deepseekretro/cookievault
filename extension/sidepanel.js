@@ -288,6 +288,7 @@ async function openDetail(snap, autoRestore) {
   $('view-detail').classList.remove('hidden');
   $('detail-label').textContent = snap.label;
   $('detail-meta').textContent = `${snap.domain} · ${snap.cookie_count} 个 Cookie · ${timeAgo(snap.created_at)}`;
+  $('restore-replace').checked = snap.is_replace !== false;
   $('cookie-search').value = '';
   $('cookie-status').textContent = '加载中…';
   try {
@@ -333,6 +334,17 @@ async function doRestore() {
   });
 }
 $('restore-btn').addEventListener('click', doRestore);
+
+// Persist the restore-mode preference per snapshot.
+$('restore-replace').addEventListener('change', async () => {
+  const snap = state.detailSnapshot;
+  if (!snap) return;
+  try {
+    await api(`/v1/snapshots/${snap.id}`, { method: 'PATCH', body: { is_replace: $('restore-replace').checked } });
+    snap.is_replace = $('restore-replace').checked;
+    toast($('restore-replace').checked ? '已设为替换模式' : '已设为合并模式');
+  } catch (e) { toast('保存模式偏好失败：' + e.message); }
+});
 
 // ---------- init ----------
 (async function init() {

@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	vaultcrypto "cookievault/server/internal/crypto"
@@ -39,7 +40,15 @@ type Server struct {
 	mu          sync.Mutex
 	unlockFails int
 	lockedUntil time.Time
+
+	lastActivity atomic.Int64 // unix seconds of last authenticated request
 }
+
+// TouchActivity records user activity (for idle auto-lock).
+func (s *Server) TouchActivity() { s.lastActivity.Store(time.Now().Unix()) }
+
+// LastActivity returns unix seconds of last activity (0 = none yet).
+func (s *Server) LastActivity() int64 { return s.lastActivity.Load() }
 
 // New creates a Server. pairCode is printed to the log at startup.
 func New(st *store.Store, v *vaultcrypto.Vault, pairCode string) *Server {
@@ -67,6 +76,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/snapshots/{id}/cookies", s.requireToken(s.requireUnlocked(s.snapshotCookies)))
 	mux.HandleFunc("DELETE /v1/snapshots/{id}", s.requireToken(s.requireUnlocked(s.snapshotDelete)))
 	mux.HandleFunc("POST /v1/snapshots/{id}/touch", s.requireToken(s.requireUnlocked(s.snapshotTouch)))
+	mux.HandleFunc("GET /v1/settings", s.requireToken(s.settingsGet))
+	mux.HandleFunc("POST /v1/settings", s.requireToken(s.settingsPost))
+	mux.HandleFunc("POST /v1/backup/export", s.requireToken(s.requireUnlocked(s.backupExport)))
+	mux.HandleFunc("POST /v1/backup/import", s.requireToken(s.requireUnlocked(s.backupImport)))
 	return guard(mux)
 }
 
@@ -137,6 +150,7 @@ func (s *Server) requireUnlocked(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusLocked, "vault_locked")
 			return
 		}
+		s.TouchActivity()
 		next(w, r)
 	}
 }
@@ -254,6 +268,7 @@ func (s *Server) authSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Vault.Unlock(dek)
+	s.TouchActivity()
 	token, err := s.issueToken("setup")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "storage_error")
@@ -297,6 +312,7 @@ func (s *Server) authUnlock(w http.ResponseWriter, r *http.Request) {
 	s.unlockFails = 0
 	s.mu.Unlock()
 	s.Vault.Unlock(dek)
+	s.TouchActivity()
 	writeJSON(w, http.StatusOK, map[string]any{"unlocked": true})
 }
 
@@ -504,6 +520,7 @@ func (s *Server) snapshotCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "storage_error")
 		return
 	}
+	s.Store.Audit("snapshot_create", snap.ID, snap.Domain+" "+snap.Label, time.Now())
 	writeJSON(w, http.StatusCreated, snap)
 }
 
@@ -565,8 +582,9 @@ func (s *Server) snapshotGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) snapshotUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Label string `json:"label"`
-		Note  string `json:"note"`
+		Label     string `json:"label"`
+		Note      string `json:"note"`
+		IsReplace *bool  `json:"is_replace"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request")
@@ -586,6 +604,9 @@ func (s *Server) snapshotUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := s.Store.SnapshotUpdate(id, label, req.Note); err != nil {
 		writeErr(w, http.StatusInternalServerError, "storage_error")
 		return
+	}
+	if req.IsReplace != nil {
+		_ = s.Store.SnapshotSetReplace(id, *req.IsReplace)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -643,17 +664,239 @@ func (s *Server) snapshotCookies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) snapshotDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.Store.SnapshotDelete(r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if err := s.Store.SnapshotDelete(id); err != nil {
 		writeErr(w, http.StatusInternalServerError, "storage_error")
 		return
 	}
+	s.Store.Audit("snapshot_delete", id, "", time.Now())
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) snapshotTouch(w http.ResponseWriter, r *http.Request) {
+	s.Store.Audit("snapshot_restore_touch", r.PathValue("id"), "", time.Now())
 	if err := s.Store.SnapshotTouch(r.PathValue("id"), time.Now()); err != nil {
 		writeErr(w, http.StatusInternalServerError, "storage_error")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// --- settings (idle auto-lock) ----------------------------------------------
+
+const defaultIdleLockMinutes = 15
+
+func (s *Server) idleLockMinutes() int {
+	v, ok, err := s.Store.MetaGet("idle_lock_minutes")
+	if err != nil || !ok {
+		return defaultIdleLockMinutes
+	}
+	n, err := strconv.Atoi(string(v))
+	if err != nil || n < 0 {
+		return defaultIdleLockMinutes
+	}
+	return n
+}
+
+func (s *Server) settingsGet(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"idle_lock_minutes": s.idleLockMinutes()})
+}
+
+func (s *Server) settingsPost(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IdleLockMinutes *int `json:"idle_lock_minutes"`
+	}
+	if err := decodeJSON(r, &req); err != nil || req.IdleLockMinutes == nil || *req.IdleLockMinutes < 0 {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if err := s.Store.MetaSet("idle_lock_minutes", []byte(strconv.Itoa(*req.IdleLockMinutes))); err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"idle_lock_minutes": *req.IdleLockMinutes})
+}
+
+// --- backup export / import ----------------------------------------------------
+//
+// A backup file is a JSON container whose payload is encrypted directly
+// under a backup password (Argon2id + AES-GCM), independent of the vault
+// DEK, so it can be imported on another installation. The plaintext payload
+// contains profiles + snapshots + decrypted cookie values.
+
+type backupSnapshot struct {
+	Snapshot store.Snapshot        `json:"snapshot"`
+	Cookies  []store.CookieInput  `json:"cookies"`
+}
+type backupPlain struct {
+	Version    int                `json:"version"`
+	ExportedAt int64              `json:"exported_at"`
+	Profiles   []store.Profile    `json:"profiles"`
+	Snapshots  []backupSnapshot   `json:"snapshots"`
+}
+type backupContainer struct {
+	Version    int                        `json:"version"`
+	KDF        vaultcrypto.PasswordEncrypted `json:"kdf"`
+}
+
+func (s *Server) backupExport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BackupPassword string `json:"backup_password"`
+	}
+	if err := decodeJSON(r, &req); err != nil || len(req.BackupPassword) < 8 {
+		writeErr(w, http.StatusBadRequest, "backup_password_too_short")
+		return
+	}
+	profiles, err := s.Store.ProfileList()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	snaps, err := s.Store.SnapshotAll()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	plain := backupPlain{Version: 1, ExportedAt: time.Now().Unix(), Profiles: profiles}
+	for _, snap := range snaps {
+		stored, err := s.Store.SnapshotCookies(snap.ID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "storage_error")
+			return
+		}
+		bs := backupSnapshot{Snapshot: snap}
+		for _, c := range stored {
+			val, err := s.Vault.Decrypt(c.Nonce, c.ValueEnc)
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "decrypt_error")
+				return
+			}
+			ci := store.CookieInput{
+				Name: c.Name, Value: val, Domain: c.Domain, HostOnly: c.HostOnly,
+				Path: c.Path, Secure: c.Secure, HTTPOnly: c.HTTPOnly,
+				SameSite: c.SameSite, PartitionKey: c.PartitionKey, Partitioned: c.Partitioned,
+			}
+			if c.ExpiresAt != nil {
+				v := float64(*c.ExpiresAt)
+				ci.ExpirationDate = &v
+			}
+			bs.Cookies = append(bs.Cookies, ci)
+		}
+		if bs.Cookies == nil {
+			bs.Cookies = []store.CookieInput{}
+		}
+		plain.Snapshots = append(plain.Snapshots, bs)
+	}
+	if plain.Snapshots == nil {
+		plain.Snapshots = []backupSnapshot{}
+	}
+	raw, err := json.Marshal(plain)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encode_error")
+		return
+	}
+	enc, err := vaultcrypto.EncryptWithPassword(req.BackupPassword, raw)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "crypto_error")
+		return
+	}
+	s.Store.Audit("backup_export", "", fmt.Sprintf("%d snapshots", len(plain.Snapshots)), time.Now())
+	writeJSON(w, http.StatusOK, backupContainer{Version: 1, KDF: *enc})
+}
+
+func (s *Server) backupImport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BackupPassword string          `json:"backup_password"`
+		SkipDuplicates *bool           `json:"skip_duplicates"`
+		Data           backupContainer `json:"data"`
+	}
+	if err := decodeJSON(r, &req); err != nil || len(req.BackupPassword) < 8 {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	raw, err := vaultcrypto.DecryptWithPassword(req.BackupPassword, &req.Data.KDF)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "wrong_backup_password")
+		return
+	}
+	var plain backupPlain
+	if err := json.Unmarshal(raw, &plain); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_backup")
+		return
+	}
+	skipDup := true
+	if req.SkipDuplicates != nil {
+		skipDup = *req.SkipDuplicates
+	}
+	// Remap profiles by name (create missing ones).
+	profileMap := map[string]string{}
+	now := nowMillis()
+	for _, p := range plain.Profiles {
+		if existing, ok, _ := s.Store.ProfileByName(p.Name); ok {
+			profileMap[p.ID] = existing.ID
+			continue
+		}
+		newP := store.Profile{ID: newID("p"), Name: p.Name, Note: p.Note, CreatedAt: now, UpdatedAt: now}
+		if err := s.Store.ProfileCreate(newP); err != nil {
+			writeErr(w, http.StatusInternalServerError, "storage_error")
+			return
+		}
+		profileMap[p.ID] = newP.ID
+	}
+	importedSnaps, importedCookies, skipped := 0, 0, 0
+	for _, bs := range plain.Snapshots {
+		old := bs.Snapshot
+		if skipDup {
+			if exists, _ := s.Store.SnapshotExistsFingerprint(old.Domain, old.Label, old.Fingerprint); exists {
+				skipped++
+				continue
+			}
+		}
+		encCookies := make([]store.EncryptedCookie, 0, len(bs.Cookies))
+		var fpParts []string
+		httpOnly := 0
+		for _, c := range bs.Cookies {
+			nonce, enc, err := s.Vault.Encrypt(c.Value)
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "crypto_error")
+				return
+			}
+			var exp *int64
+			if c.ExpirationDate != nil {
+				v := int64(*c.ExpirationDate)
+				exp = &v
+			}
+			encCookies = append(encCookies, store.EncryptedCookie{
+				Input: c, ValueEnc: enc, Nonce: nonce,
+				Hash: store.Fingerprint([]string{c.Name, c.Domain, c.Path, c.Value}), ExpiresAt: exp,
+			})
+			fpParts = append(fpParts, c.Name, c.Domain, c.Path, c.Value)
+			if c.HTTPOnly {
+				httpOnly++
+			}
+		}
+		fingerprint := old.Fingerprint
+		if fingerprint == "" && len(fpParts) > 0 {
+			fingerprint = store.Fingerprint(fpParts)
+		}
+		snap := store.Snapshot{
+			ID: newID("s"), Domain: old.Domain, Label: old.Label, Note: old.Note,
+			SourceURL: old.SourceURL, StoreID: old.StoreID, IsReplace: old.IsReplace,
+			Fingerprint: fingerprint, CookieCount: len(encCookies), HTTPOnlyCount: httpOnly,
+			CreatedAt: now, LastUsedAt: now,
+		}
+		if pid, ok := profileMap[old.ProfileID]; ok {
+			snap.ProfileID = pid
+		}
+		if err := s.Store.SnapshotCreate(snap, encCookies); err != nil {
+			writeErr(w, http.StatusInternalServerError, "storage_error")
+			return
+		}
+		importedSnaps++
+		importedCookies += len(encCookies)
+	}
+	s.Store.Audit("backup_import", "", fmt.Sprintf("%d snapshots", importedSnaps), time.Now())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"imported_snapshots": importedSnaps, "imported_cookies": importedCookies, "skipped": skipped,
+	})
 }

@@ -73,4 +73,47 @@ $('change').onclick = async () => {
   catch (e) { msg('修改失败：' + e.message); }
 };
 
+$('save-settings').onclick = async () => {
+  try {
+    const data = await rawApi('/v1/settings', { method: 'POST', body: { idle_lock_minutes: Number($('idle-minutes').value || 0) } });
+    msg(`已保存：闲置 ${data.idle_lock_minutes} 分钟自动锁定`);
+  } catch (e) { msg('保存设置失败：' + e.message); }
+};
+
+$('export').onclick = async () => {
+  const pw = $('backup-pw').value;
+  if (!pw || pw.length < 8) { $('backup-status').textContent = '备份密码至少 8 位'; return; }
+  try {
+    $('backup-status').textContent = '导出中…';
+    const data = await rawApi('/v1/backup/export', { method: 'POST', body: { backup_password: pw } });
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `cookievault-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    $('backup-status').textContent = '已导出（文件已加密）';
+  } catch (e) { $('backup-status').textContent = '导出失败：' + e.message; }
+};
+
+$('import').onclick = async () => {
+  const file = $('import-file').files[0];
+  const pw = $('backup-pw').value;
+  if (!file) { $('backup-status').textContent = '先选择备份文件'; return; }
+  if (!pw || pw.length < 8) { $('backup-status').textContent = '备份密码至少 8 位'; return; }
+  try {
+    $('backup-status').textContent = '导入中…';
+    const data = JSON.parse(await file.text());
+    const res = await rawApi('/v1/backup/import', { method: 'POST', body: { backup_password: pw, data } });
+    $('backup-status').textContent = `导入完成：快照 ${res.imported_snapshots}，Cookie ${res.imported_cookies}，跳过重复 ${res.skipped}`;
+  } catch (e) { $('backup-status').textContent = '导入失败：' + e.message; }
+};
+
+async function loadSettings() {
+  try {
+    const s = await rawApi('/v1/settings');
+    $('idle-minutes').value = s.idle_lock_minutes;
+  } catch { /* ignore */ }
+}
+loadSettings();
 refresh();

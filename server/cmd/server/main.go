@@ -43,6 +43,37 @@ func main() {
 		log.Printf("first run: set a master password via POST /v1/auth/setup (min 8 chars)")
 	}
 
+	// Idle auto-lock: check every 30s; lock when no authenticated
+	// activity for idle_lock_minutes (0 = disabled, default 15).
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if !v.IsUnlocked() {
+				continue
+			}
+			v2, ok, _ := st.MetaGet("idle_lock_minutes")
+			minutes := 15
+			if ok {
+				var n int
+				if _, err := fmt.Sscanf(string(v2), "%d", &n); err == nil {
+					minutes = n
+				}
+			}
+			if minutes <= 0 {
+				continue
+			}
+			last := srv.LastActivity()
+			if last == 0 {
+				continue
+			}
+			if time.Now().Unix()-last > int64(minutes)*60 {
+				v.Lock()
+				log.Printf("idle auto-lock after %d min", minutes)
+			}
+		}
+	}()
+
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

@@ -46,6 +46,14 @@ Go 服务端 ── 解密/加密 ──▶ SQLite (value_enc + nonce)
 3. 逐条 `chrome.cookies.set`（失败时去掉 partitionKey 重试一次），汇总成功/失败数
 4. `touch` 快照更新 last_used_at
 
+## P2 增补
+
+- **备份**：`POST /v1/backup/export|import`。备份内容（profiles+snapshots+解码后 Cookie 值）用独立 backup_password 直接加密（Argon2id+AES-GCM，文件不含明文），与 vault DEK 无关，换机器/换主密码可导入。导入时新分配 id、Profile 按 name 复用、按 (domain,label,fingerprint) 去重跳过（`skip_duplicates` 可关）。
+- **闲置自动锁定**：`GET/POST /v1/settings {idle_lock_minutes}`（默认 15，0 禁用），服务端每 30s 检查最后一次鉴权请求时间，超时则清 DEK 锁定。
+- **FTS5**：`snapshots_fts` trigram 外部内容表 + 触发器同步；≥3 字符 token 走 FTS 前缀 AND，短/CJK 查询回退 LIKE。需 `-tags sqlite_fts5` 构建，未带 tag 时自动回退 LIKE（功能不变）。
+- **恢复模式**：替换（默认）/合并，每快照 `is_replace` 偏好可 PATCH 持久化。
+- **审计**：snapshot_create/delete/restore_touch/backup_* 写 audit_log，只记元数据。
+
 ## 安全
 - 只绑 loopback；Host/Origin 白名单；自定义 Header + Bearer Token
 - 主密钥只在内存（解锁时），锁定清零；忘记主密码不可恢复

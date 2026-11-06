@@ -100,8 +100,34 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 `
 
+// ftsSchema is FTS5 (trigram) full-text index over snapshots.
+// It requires the go-sqlite3 driver built with -tags sqlite_fts5;
+// if unavailable, Open falls back to LIKE search (ftsEnabled=false).
+const ftsSchema = `
+CREATE VIRTUAL TABLE IF NOT EXISTS snapshots_fts USING fts5(
+  label, domain, note, content='snapshots', content_rowid='rowid',
+  tokenize='trigram');
+CREATE TRIGGER IF NOT EXISTS snapshots_fts_insert AFTER INSERT ON snapshots BEGIN
+  INSERT INTO snapshots_fts(rowid, label, domain, note)
+  VALUES (new.rowid, new.label, new.domain, new.note);
+END;
+CREATE TRIGGER IF NOT EXISTS snapshots_fts_delete AFTER DELETE ON snapshots BEGIN
+  INSERT INTO snapshots_fts(snapshots_fts, rowid, label, domain, note)
+  VALUES ('delete', old.rowid, old.label, old.domain, old.note);
+END;
+CREATE TRIGGER IF NOT EXISTS snapshots_fts_update AFTER UPDATE ON snapshots BEGIN
+  INSERT INTO snapshots_fts(snapshots_fts, rowid, label, domain, note)
+  VALUES ('delete', old.rowid, old.label, old.domain, old.note);
+  INSERT INTO snapshots_fts(rowid, label, domain, note)
+  VALUES (new.rowid, new.label, new.domain, new.note);
+END;
+`
+
 // Store wraps *sql.DB.
-type Store struct{ DB *sql.DB }
+type Store struct {
+	DB         *sql.DB
+	ftsEnabled bool
+}
 
 // Open opens (creating if needed) the SQLite database at path.
 func Open(path string) (*Store, error) {
@@ -114,7 +140,13 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 	db.SetMaxOpenConns(1) // SQLite single writer
-	return &Store{DB: db}, nil
+	st := &Store{DB: db}
+	if _, err := db.Exec(ftsSchema); err == nil {
+		// Rebuild FTS index from content (covers DBs created before FTS).
+		_, _ = db.Exec(`INSERT INTO snapshots_fts(snapshots_fts) VALUES('rebuild')`)
+		st.ftsEnabled = true
+	}
+	return st, nil
 }
 
 // Close closes the database.
@@ -198,6 +230,16 @@ func (s *Store) ProfileList() ([]Profile, error) {
 		out = []Profile{}
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) ProfileByName(name string) (Profile, bool, error) {
+	var p Profile
+	err := s.DB.QueryRow(`SELECT id,name,note,created_at,updated_at FROM profiles WHERE name=?`, name).
+		Scan(&p.ID, &p.Name, &p.Note, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Profile{}, false, nil
+	}
+	return p, err == nil, err
 }
 
 func (s *Store) ProfileDelete(id string) error {
@@ -315,6 +357,25 @@ type ListResult struct {
 	Total      int
 }
 
+// ftsQuery builds an FTS5 trigram query from free text: each token with
+// at least 3 runes becomes a quoted prefix term, ANDed together.
+// Returns ok=false when no usable token exists (caller falls back to LIKE,
+// which also covers short / CJK queries trigram cannot match).
+func ftsQuery(q string) (string, bool) {
+	var terms []string
+	for _, tok := range strings.Fields(q) {
+		tok = strings.Trim(tok, "\"'")
+		if len([]rune(tok)) < 3 {
+			continue
+		}
+		terms = append(terms, `"`+tok+`"*`)
+	}
+	if len(terms) == 0 {
+		return "", false
+	}
+	return strings.Join(terms, " AND "), true
+}
+
 func sortColumn(sort string) (col, dir string, ok bool) {
 	switch sort {
 	case "", "last_used_at:desc":
@@ -342,13 +403,13 @@ func (q ListQuery) normalized() (col, dir string, limit int) {
 }
 
 func (s *Store) SnapshotCount(q ListQuery) (int, error) {
-	where, args := listWhere(q)
+	where, args := s.listWhere(q)
 	var n int
 	err := s.DB.QueryRow(`SELECT COUNT(*) FROM snapshots`+where, args...).Scan(&n)
 	return n, err
 }
 
-func listWhere(q ListQuery) (string, []any) {
+func (s *Store) listWhere(q ListQuery) (string, []any) {
 	var clauses []string
 	var args []any
 	if q.Domain != "" {
@@ -360,9 +421,20 @@ func listWhere(q ListQuery) (string, []any) {
 		args = append(args, q.ProfileID)
 	}
 	if q.Q != "" {
-		clauses = append(clauses, "(label LIKE ? OR domain LIKE ? OR note LIKE ?)")
-		like := "%" + q.Q + "%"
-		args = append(args, like, like, like)
+		usedFTS := false
+		if s.ftsEnabled {
+			if fts, ok := ftsQuery(q.Q); ok {
+				clauses = append(clauses, "EXISTS (SELECT 1 FROM snapshots_fts WHERE snapshots_fts.rowid = snapshots.rowid AND snapshots_fts MATCH ?)")
+				args = append(args, fts)
+				usedFTS = true
+			}
+		}
+		if !usedFTS {
+			// LIKE fallback (no FTS, or short/CJK query trigram can't match).
+			clauses = append(clauses, "(label LIKE ? OR domain LIKE ? OR note LIKE ?)")
+			like := "%" + q.Q + "%"
+			args = append(args, like, like, like)
+		}
 	}
 	if len(clauses) == 0 {
 		return "", args
@@ -372,7 +444,7 @@ func listWhere(q ListQuery) (string, []any) {
 
 func (s *Store) SnapshotList(q ListQuery) (ListResult, error) {
 	col, dir, limit := q.normalized()
-	where, args := listWhere(q)
+	where, args := s.listWhere(q)
 
 	if q.CursorKey != "" && q.CursorID != "" {
 		// Keyset condition: (col, id) strictly after cursor in sort order.
@@ -495,6 +567,41 @@ func (s *Store) SnapshotGet(id string) (Snapshot, bool, error) {
 	snap.ProfileID = profileID.String
 	snap.IsReplace = isReplace != 0
 	return snap, true, nil
+}
+
+// SnapshotAll returns every snapshot (used for backup export).
+func (s *Store) SnapshotAll() ([]Snapshot, error) {
+	res, err := s.SnapshotList(ListQuery{Limit: 200, Sort: "created_at:asc"})
+	if err != nil {
+		return nil, err
+	}
+	out := res.Items
+	for res.HasMore {
+		key, id, _ := DecodeCursor(res.NextCursor)
+		res, err = s.SnapshotList(ListQuery{Limit: 200, Sort: "created_at:asc", CursorKey: key, CursorID: id})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, res.Items...)
+	}
+	return out, nil
+}
+
+// SnapshotExistsFingerprint reports whether an identical snapshot
+// (same domain+label+fingerprint) already exists (backup import dedup).
+func (s *Store) SnapshotExistsFingerprint(domain, label, fingerprint string) (bool, error) {
+	var one int
+	err := s.DB.QueryRow(`SELECT 1 FROM snapshots WHERE domain=? AND label=? AND fingerprint=? LIMIT 1`,
+		domain, label, fingerprint).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *Store) SnapshotSetReplace(id string, isReplace bool) error {
+	_, err := s.DB.Exec(`UPDATE snapshots SET is_replace=? WHERE id=?`, boolInt(isReplace), id)
+	return err
 }
 
 func (s *Store) SnapshotUpdate(id, label, note string) error {

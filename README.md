@@ -26,7 +26,7 @@ cookievault/
 
 ```bash
 cd server
-go build -o cookievault-server ./cmd/server
+make build                      # 带 FTS5 全文搜索；不带 tag 也可运行（自动回退 LIKE）
 ./cookievault-server            # 监听 127.0.0.1:18765，数据在 ./data
 ```
 
@@ -64,5 +64,12 @@ Chrome / Edge → 扩展 → 开发者模式 → **加载已解压的扩展程�
 cd server && go vet ./... && go test ./...
 cd ../extension && node --check background.js sidepanel.js popup.js options.js
 ```
+
+## P2 已实现
+
+- **加密备份导入导出**：备份文件用独立备份密码（Argon2id+AES-GCM）整体加密，可跨机器/换主密码导入；导入按指纹去重
+- **闲置自动锁定**：默认 15 分钟无操作自动锁定，可在设置页调整（0=禁用）
+- **FTS5 全文搜索**：trigram 索引搜标签/域名/备注（带 `-tags sqlite_fts5` 构建时）
+- **合并/替换恢复模式**可按快照保存偏好；操作审计日志（只记元数据）
 
 详细设计见 [DESIGN.md](DESIGN.md)。

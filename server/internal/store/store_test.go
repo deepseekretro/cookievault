@@ -72,6 +72,32 @@ func TestSnapshotCreateListSearchPagination(t *testing.T) {
 		t.Fatalf("expected erin first, got %v", seen)
 	}
 
+	// FTS search (trigram): alice-account / bob-account etc.
+	ftsRes, err := st.SnapshotList(ListQuery{Q: "alice", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ftsRes.Items) != 1 || ftsRes.Items[0].Label != "alice-account" {
+		t.Fatalf("fts search failed: %+v", ftsRes.Items)
+	}
+	// Short query falls back to LIKE.
+	shortRes, err := st.SnapshotList(ListQuery{Q: "bo", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shortRes.Items) != 1 || shortRes.Items[0].Label != "bob-account" {
+		t.Fatalf("like fallback failed: %+v", shortRes.Items)
+	}
+	// SnapshotAll + fingerprint dedup helpers.
+	all, err := st.SnapshotAll()
+	if err != nil || len(all) != 5 {
+		t.Fatalf("SnapshotAll: %v %d", err, len(all))
+	}
+	exists, _ := st.SnapshotExistsFingerprint("example.com", "bob-account", all[1].Fingerprint)
+	if !exists {
+		t.Fatal("expected fingerprint exists for bob snapshot")
+	}
+
 	// Cookies roundtrip (encrypted blob untouched by store).
 	cks, err := st.SnapshotCookies("s_bob")
 	if err != nil || len(cks) != 1 || string(cks[0].ValueEnc) != "enc" {

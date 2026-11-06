@@ -40,6 +40,20 @@ func TestWrapUnwrapAndEncrypt(t *testing.T) {
 	}
 }
 
+func TestPasswordEncrypted(t *testing.T) {
+	pe, err := EncryptWithPassword("backup-password-1", []byte("{\"snapshots\":[]}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecryptWithPassword("wrong", pe); err == nil {
+		t.Fatal("expected wrong password error")
+	}
+	out, err := DecryptWithPassword("backup-password-1", pe)
+	if err != nil || string(out) != "{\"snapshots\":[]}" {
+		t.Fatalf("roundtrip: %q %v", out, err)
+	}
+}
+
 func TestRewrap(t *testing.T) {
 	_, dek, _ := NewWrappedDEK("old-password-1")
 	rewrapped, err := Rewrap(dek, "new-password-1")

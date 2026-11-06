@@ -35,6 +35,23 @@
   <p class="muted">主密码遗忘 = 数据不可恢复。请妥善保管，改主密码只需重新包装密钥，不会重加密 Cookie。</p>
 </div>
 
+<div class="card">
+  <h3>3. 闲置自动锁定</h3>
+  <label>无操作多少分钟后自动锁定（0 = 禁用）<input id="idle-minutes" type="number" min="0" /></label>
+  <button id="save-settings">保存设置</button>
+</div>
+
+<div class="card">
+  <h3>4. 加密备份</h3>
+  <label>备份密码（至少 8 位，独立于主密码，导入时需要）<input id="backup-pw" type="password" /></label>
+  <button id="export">导出备份文件</button>
+  <hr />
+  <label>导入备份文件<input id="import-file" type="file" accept=".json,application/json" /></label>
+  <button id="import">导入备份</button>
+  <span id="backup-status" class="muted"></span>
+  <p class="muted">备份文件整体加密，换电脑/重装后用备份密码导入即可；重复导入会自动跳过已存在的快照。</p>
+</div>
+
 <div id="msg"></div>
 <script src="options.js"></script>
 </body></html>

@@ -40,9 +40,9 @@ const (
 
 // Params are persisted so they can be tuned later without breaking old DBs.
 type Params struct {
-	Time    uint32
-	Memory  uint32
-	Threads uint8
+	Time    uint32 `json:"time"`
+	Memory  uint32 `json:"memory"`
+	Threads uint8  `json:"threads"`
 }
 
 // DefaultParams returns the current KDF parameters.
@@ -222,3 +222,38 @@ func ParseParams(b []byte) (Params, error) {
 
 // ConstantTimeEqual is a small helper for comparing secrets.
 func ConstantTimeEqual(a, b []byte) bool { return subtle.ConstantTimeCompare(a, b) == 1 }
+
+// PasswordEncrypted is a standalone encrypted blob (e.g. a backup file),
+// encrypted directly under a password instead of the vault DEK, so it can
+// be restored on a different installation with its own master password.
+type PasswordEncrypted struct {
+	Salt       []byte `json:"salt"`
+	Params     Params `json:"params"`
+	Nonce      []byte `json:"nonce"`
+	Ciphertext []byte `json:"ciphertext"`
+}
+
+// EncryptWithPassword seals plaintext under a password-derived key.
+func EncryptWithPassword(password string, plaintext []byte) (*PasswordEncrypted, error) {
+	salt := make([]byte, saltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, err
+	}
+	p := DefaultParams()
+	key := deriveKEK(password, salt, p)
+	nonce, ct, err := seal(key, plaintext)
+	if err != nil {
+		return nil, err
+	}
+	return &PasswordEncrypted{Salt: salt, Params: p, Nonce: nonce, Ciphertext: ct}, nil
+}
+
+// DecryptWithPassword opens a PasswordEncrypted blob.
+func DecryptWithPassword(password string, pe *PasswordEncrypted) ([]byte, error) {
+	key := deriveKEK(password, pe.Salt, pe.Params)
+	out, err := open(key, pe.Nonce, pe.Ciphertext)
+	if err != nil {
+		return nil, ErrWrongPassword
+	}
+	return out, nil
+}
