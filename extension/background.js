@@ -26,6 +26,12 @@ async function api(path, options = {}) {
   return data;
 }
 
+// Short timestamp for auto-generated snapshot labels (keeps card titles short).
+function shortTime(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 // chrome.cookies returns partitionKey as an object; store it as JSON string.
 function partitionKeyToString(pk) {
   if (!pk) return '';
@@ -221,8 +227,8 @@ async function restoreSnapshot(id, { backupBefore = true } = {}) {
         method: 'POST',
         body: JSON.stringify({
           domain: snap.domain,
-          label: `自动备份 ${new Date().toLocaleString()}（恢复「${snap.label}」前）`,
-          note: 'auto-backup before restore',
+          label: `自动备份·${shortTime()}`,
+          note: `auto-backup before restore: ${snap.label}`,
           is_replace: true,
           cookies: current,
         }),
@@ -315,7 +321,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     try { domain = new URL(tab.url).hostname; } catch { return; }
     if (!domain || !(await isDirty(domain))) return;
     await saveSnapshot({
-      label: `闲置锁定前自动备份 ${new Date().toLocaleString()}`,
+      label: `锁前备份·${shortTime()}`, 
       note: 'auto-backup before idle lock',
       domain, sourceUrl: tab.url,
     });

@@ -611,7 +611,7 @@ $('set-lock').addEventListener('click', async () => {
       if (tab?.url) {
         const domain = new URL(tab.url).hostname;
         if (domain) {
-          const r = await chrome.runtime.sendMessage({ type: 'SAVE', payload: { label: `手动锁定前自动备份 ${new Date().toLocaleString()}`, note: 'auto-backup before manual lock', domain, sourceUrl: tab.url } });
+          const r = await chrome.runtime.sendMessage({ type: 'SAVE', payload: { label: `锁前备份·${(()=>{const d=new Date(),p=n=>String(n).padStart(2,'0');return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`})()}`, note: 'auto-backup before manual lock', domain, sourceUrl: tab.url } });
           if (r.ok) setMsg(`锁定前已自动备份当前域名（${r.snapshot.cookie_count} 个 Cookie）`);
         }
       }
