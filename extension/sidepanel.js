@@ -77,39 +77,35 @@ const state = {
   currentDomain: '',
   detailSnapshot: null,
   cookies: [],
-  profiles: [],
-  profileNames: new Map(),
+  groups: [],
 };
 
-async function loadProfiles() {
-  try {
-    const data = await api('/v1/profiles');
-    state.profiles = data.items || [];
-  } catch { state.profiles = []; }
-  state.profileNames = new Map(state.profiles.map((p) => [p.id, p.name]));
-  const filterSel = $('filter-profile');
-  const saveSel = $('save-profile');
-  const curFilter = filterSel.value;
-  const curSave = saveSel.value;
-  filterSel.innerHTML = '<option value="">全部 Profile</option>' +
-    state.profiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
-  saveSel.innerHTML = '<option value="">不分组</option>' +
-    state.profiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
-  filterSel.value = curFilter;
-  saveSel.value = curSave;
+// Main (registrable) domain, mirroring the server's grouping:
+// www/sub.example.com -> example.com, sub.example.co.uk -> example.co.uk.
+const SECOND_LEVEL_SUFFIXES = new Set(['co.uk','org.uk','ac.uk','gov.uk','com.cn','net.cn','org.cn','gov.cn','edu.cn','com.au','net.au','org.au','co.jp','ne.jp','co.kr','com.hk','com.tw','co.nz','co.za','com.br']);
+function mainDomain(host) {
+  const h = String(host || '').replace(/^\./, '').toLowerCase();
+  const parts = h.split('.').filter(Boolean);
+  if (parts.length <= 2) return h;
+  const suffix = parts.slice(-2).join('.');
+  if (SECOND_LEVEL_SUFFIXES.has(suffix)) return parts.slice(-3).join('.');
+  return parts.slice(-2).join('.');
 }
-$('filter-profile').addEventListener('change', () => loadSnapshots(true));
-$('new-profile').addEventListener('click', async () => {
-  const name = prompt('Profile 名称（如 工作 / 个人）');
-  if (!name || !name.trim()) return;
+
+// Auto grouping: groups come from the server (snapshots grouped by
+// main domain) — the user never has to fill in a group.
+async function loadGroups() {
   try {
-    const p = await api('/v1/profiles', { method: 'POST', body: { name: name.trim() } });
-    await loadProfiles();
-    $('filter-profile').value = p.id;
-    toast(`已创建 Profile「${p.name}」`);
-    loadSnapshots(true);
-  } catch (e) { toast('创建 Profile 失败：' + e.message); }
-});
+    const data = await api('/v1/snapshots/groups');
+    state.groups = data.items || [];
+  } catch { state.groups = []; }
+  const sel = $('filter-group');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部站点</option>' +
+    state.groups.map((g) => `<option value="${esc(g.main_domain)}">${esc(g.main_domain)}（${g.count}）</option>`).join('');
+  sel.value = cur;
+}
+$('filter-group').addEventListener('change', () => loadSnapshots(true));
 
 const snapList = new VirtualList({
   scrollEl: $('scroll'), spacerEl: $('spacer'), windowEl: $('window'),
@@ -121,7 +117,7 @@ const snapList = new VirtualList({
     card.innerHTML = `
       <div class="row1"><span class="label">${highlight(snap.label, q)}</span>
         <span class="muted">${snap.cookie_count} 个 Cookie</span></div>
-      <div class="row2"><span>${state.profileNames.get(snap.profile_id) ? esc(state.profileNames.get(snap.profile_id)) + ' · ' : ''}${highlight(snap.domain, q)} · ${timeAgo(snap.last_used_at)}</span>
+      <div class="row2"><span>${esc(mainDomain(snap.domain))} · ${highlight(snap.domain, q)} · ${timeAgo(snap.last_used_at)}</span>
         <span class="actions">
           <button class="btn small primary" data-act="restore">恢复</button>
           <button class="btn small" data-act="compare">对比</button>
@@ -164,7 +160,7 @@ async function loadSnapshots(reset) {
     });
     const q = $('search').value.trim();
     if (q) params.set('q', q);
-    if ($('filter-profile').value) params.set('profile_id', $('filter-profile').value);
+    if ($('filter-group').value) params.set('domain', $('filter-group').value);
     if ($('filter-current-domain').checked && state.currentDomain) params.set('domain', state.currentDomain);
     if (state.cursor) params.set('cursor', state.cursor);
 
@@ -237,12 +233,13 @@ $('save-confirm').addEventListener('click', async () => {
     const url = new URL(tab.url);
     const r = await chrome.runtime.sendMessage({
       type: 'SAVE',
-      payload: { label, note: $('save-note').value.trim(), domain: url.hostname, sourceUrl: url.href, profileId: $('save-profile').value },
+      payload: { label, note: $('save-note').value.trim(), domain: url.hostname, sourceUrl: url.href },
     });
     if (!r.ok) throw new Error(r.error);
     toast(`已保存「${label}」（${r.snapshot.cookie_count} 个 Cookie）`);
     $('save-label').value = ''; $('save-note').value = '';
     $('save-row').classList.add('hidden');
+    await loadGroups();
     loadSnapshots(true);
   } catch (e) { toast('保存失败：' + e.message); }
 });
@@ -659,6 +656,6 @@ $('set-import').addEventListener('click', async () => {
       try { state.currentDomain = new URL(tabs[0].url).hostname; } catch { /* ignore */ }
     }
   } catch { /* tabs permission may be absent */ }
-  await loadProfiles();
+  await loadGroups();
   loadSnapshots(true);
 })();

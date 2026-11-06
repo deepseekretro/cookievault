@@ -569,6 +569,32 @@ func (s *Store) SnapshotGet(id string) (Snapshot, bool, error) {
 	return snap, true, nil
 }
 
+// GroupCount is a main-domain group with snapshot count.
+type GroupCount struct {
+	MainDomain string `json:"main_domain"`
+	Count      int    `json:"count"`
+}
+
+// SnapshotGroups aggregates snapshots by (Go-computed) main domain.
+// The aggregation itself is done in the api layer via DomainMain;
+// this returns raw domain counts.
+func (s *Store) SnapshotDomainCounts() ([]GroupCount, error) {
+	rows, err := s.DB.Query(`SELECT domain, COUNT(*) FROM snapshots GROUP BY domain`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []GroupCount
+	for rows.Next() {
+		var g GroupCount
+		if err := rows.Scan(&g.MainDomain, &g.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
 // SnapshotAll returns every snapshot (used for backup export).
 func (s *Store) SnapshotAll() ([]Snapshot, error) {
 	res, err := s.SnapshotList(ListQuery{Limit: 200, Sort: "created_at:asc"})

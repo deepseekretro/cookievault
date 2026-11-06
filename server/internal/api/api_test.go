@@ -42,6 +42,25 @@ func doReq(t *testing.T, srv *Server, method, path, token string, body any) (int
 	return rec.Code, out
 }
 
+func TestMainDomain(t *testing.T) {
+	cases := map[string]string{
+		"www.example.com":       "example.com",
+		"sub.example.com":       "example.com",
+		"example.com":           "example.com",
+		".example.com":          "example.com",
+		"edge02.10w123.com":     "10w123.com",
+		"a.b.example.co.uk":     "example.co.uk",
+		"www.example.com.cn":    "example.com.cn",
+		"localhost":             "localhost",
+		"127.0.0.1":             "127.0.0.1",
+	}
+	for in, want := range cases {
+		if got := mainDomain(in); got != want {
+			t.Errorf("mainDomain(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
 func TestAllowedHostsGuard(t *testing.T) {
 	srv, _ := setupServer(t)
 	// Loopback is always allowed.

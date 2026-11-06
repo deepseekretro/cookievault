@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,6 +86,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/profiles/{id}", s.requireToken(s.requireUnlocked(s.profileDelete)))
 	mux.HandleFunc("POST /v1/snapshots", s.requireToken(s.requireUnlocked(s.snapshotCreate)))
 	mux.HandleFunc("GET /v1/snapshots", s.requireToken(s.requireUnlocked(s.snapshotList)))
+	mux.HandleFunc("GET /v1/snapshots/groups", s.requireToken(s.requireUnlocked(s.snapshotGroups)))
 	mux.HandleFunc("GET /v1/snapshots/compare", s.requireToken(s.requireUnlocked(s.snapshotCompare)))
 	mux.HandleFunc("POST /v1/snapshots/{id}/export", s.requireToken(s.requireUnlocked(s.snapshotExport)))
 	mux.HandleFunc("GET /v1/snapshots/{id}", s.requireToken(s.requireUnlocked(s.snapshotGet)))
@@ -469,6 +471,78 @@ type snapshotCreateReq struct {
 	Cookies   []store.CookieInput `json:"cookies"`
 }
 
+// mainDomain returns the registrable (main) domain of a host, using a
+// small built-in public-suffix heuristic (co.uk/com.cn style suffixes
+// take 3 labels, everything else 2). IPs and localhost are returned as-is.
+var secondLevelSuffixes = map[string]bool{
+	"co.uk": true, "org.uk": true, "ac.uk": true, "gov.uk": true,
+	"com.cn": true, "net.cn": true, "org.cn": true, "gov.cn": true, "edu.cn": true,
+	"com.au": true, "net.au": true, "org.au": true,
+	"co.jp": true, "ne.jp": true, "co.kr": true, "com.hk": true, "com.tw": true,
+	"co.nz": true, "co.za": true, "com.br": true,
+}
+
+func mainDomain(host string) string {
+	host = strings.TrimSpace(strings.ToLower(strings.TrimPrefix(host, ".")))
+	if host == "" || host == "localhost" || net.ParseIP(host) != nil {
+		return host
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) <= 2 {
+		return host
+	}
+	suffix := parts[len(parts)-2] + "." + parts[len(parts)-1]
+	if secondLevelSuffixes[suffix] {
+		if len(parts) <= 3 {
+			return host
+		}
+		return strings.Join(parts[len(parts)-3:], ".")
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
+}
+
+// ensureMainDomainProfile finds or creates the auto-group profile
+// named after the site's main domain.
+func (s *Server) ensureMainDomainProfile(domain string) string {
+	main := mainDomain(domain)
+	if main == "" {
+		return ""
+	}
+	if p, ok, _ := s.Store.ProfileByName(main); ok {
+		return p.ID
+	}
+	now := nowMillis()
+	p := store.Profile{ID: newID("p"), Name: main, Note: "auto: grouped by main domain", CreatedAt: now, UpdatedAt: now}
+	if err := s.Store.ProfileCreate(p); err != nil {
+		return ""
+	}
+	return p.ID
+}
+
+func (s *Server) snapshotGroups(w http.ResponseWriter, r *http.Request) {
+	raw, err := s.Store.SnapshotDomainCounts()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	agg := map[string]int{}
+	for _, g := range raw {
+		agg[mainDomain(g.MainDomain)] += g.Count
+	}
+	groups := make([]store.GroupCount, 0, len(agg))
+	for main, n := range agg {
+		groups = append(groups, store.GroupCount{MainDomain: main, Count: n})
+	}
+	// Sort by count descending, then name.
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].Count != groups[j].Count {
+			return groups[i].Count > groups[j].Count
+		}
+		return groups[i].MainDomain < groups[j].MainDomain
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"items": groups})
+}
+
 func (s *Server) snapshotCreate(w http.ResponseWriter, r *http.Request) {
 	var req snapshotCreateReq
 	if err := decodeJSON(r, &req); err != nil {
@@ -524,9 +598,14 @@ func (s *Server) snapshotCreate(w http.ResponseWriter, r *http.Request) {
 	if req.IsReplace != nil {
 		isReplace = *req.IsReplace
 	}
+	// Auto-group by the site's main domain when no profile was given.
+	profileID := req.ProfileID
+	if profileID == "" {
+		profileID = s.ensureMainDomainProfile(req.Domain)
+	}
 	now := nowMillis()
 	snap := store.Snapshot{
-		ID: newID("s"), ProfileID: req.ProfileID, Domain: req.Domain,
+		ID: newID("s"), ProfileID: profileID, Domain: req.Domain,
 		Label: req.Label, Note: req.Note, SourceURL: req.SourceURL,
 		StoreID: req.StoreID, IsReplace: isReplace,
 		Fingerprint: store.Fingerprint(fpParts),
