@@ -1,0 +1,52 @@
+# CookieVault 设计文档（v4）
+
+## 决策记录
+- 存储：SQLite（WAL）；Cookie 值落盘加密
+- 密钥：用户主密码，Argon2id + AES-256-GCM 信封加密（改密码只重包 DEK）
+- 插件：Chrome / Edge，Manifest V3，侧边栏为主界面
+- 保存模式：每次保存新建快照，必填标签；同域名多账号靠快照互斥切换
+- 浏览：虚拟列表（定高行）+ 无限滚动（游标分页）+ 顶部搜索框（服务端搜索 + 高亮）
+
+## 架构
+```
+插件 sidepanel/background ──chrome.cookies API──▶ 浏览器 Cookie
+        │  fetch http://127.0.0.1:18765 (Bearer Token)
+        ▼
+Go 服务端 ── 解密/加密 ──▶ SQLite (value_enc + nonce)
+```
+
+## 数据模型
+- `profiles(id, name, note)`：可选分组
+- `snapshots(id, profile_id, domain, label, note, store_id, is_replace, fingerprint, cookie_count, http_only_count, created_at, last_used_at)`：一次保存 = 一个账号登录状态
+- `cookies(id, snapshot_id, name, domain, host_only, path, secure, http_only, same_site, expires_at, partitioned, partition_key, value_enc, nonce, hash)`：值加密，元数据明文以便索引搜索；同快照内按 (name,domain,path,partition) 去重，跨快照不去重
+- `meta`：KDF 盐、参数、包装后的 DEK；`tokens`：Token 哈希；`audit_log`：仅元数据
+
+## API（节选）
+- `GET /v1/health`、`GET /v1/auth/status`
+- `POST /v1/auth/setup|unlock|lock|change-password`
+- `POST /v1/pair/verify`（配对码 → Token）、`POST /v1/pair/code`
+- `GET/POST /v1/profiles`、`DELETE /v1/profiles/{id}`
+- `POST /v1/snapshots`（新建快照，label 必填）
+- `GET /v1/snapshots?q=&domain=&profile_id=&sort=&limit=&cursor=` → `{items, next_cursor, has_more, total}`（游标 = base64url("<排序键>\n<id>")）
+- `GET/PATCH/DELETE /v1/snapshots/{id}`、`GET /v1/snapshots/{id}/cookies?q=`、`POST /v1/snapshots/{id}/touch`
+
+## 虚拟列表 + 无限滚动
+- 快照卡片定高 76px、Cookie 行 44px；只渲染可视区 + overscan(5)，DOM 恒定 ≤ 30 个节点
+- 占位层高度 = total × 行高，撑起真实滚动条；rAF 节流滚动渲染
+- IntersectionObserver 哨兵 + 距底 400px 预加载，游标续载，客户端 Map 按 id 去重
+- 详情页 Cookie 是本地过滤（单快照通常 < 数百条）
+
+## 搜索
+- 顶部搜索框防抖 300ms，服务端 LIKE 匹配 label/domain/note，结果 <mark> 高亮
+- `/` 聚焦、`Esc` 清空；搜索重置游标与滚动；可叠加"仅当前域名"与排序
+
+## 恢复流程
+1. （可选）把当前域名 Cookie 自动存为“自动备份”快照
+2. 替换模式：`chrome.cookies.remove` 清除该域名现有 Cookie
+3. 逐条 `chrome.cookies.set`（失败时去掉 partitionKey 重试一次），汇总成功/失败数
+4. `touch` 快照更新 last_used_at
+
+## 安全
+- 只绑 loopback；Host/Origin 白名单；自定义 Header + Bearer Token
+- 主密钥只在内存（解锁时），锁定清零；忘记主密码不可恢复
+- 不绕过 HttpOnly：只用官方 chrome.cookies API；__Host- 等受浏览器策略限制的 Cookie 恢复可能失败并如实汇报

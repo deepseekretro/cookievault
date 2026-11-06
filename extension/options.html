@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" />
+<title>CookieVault 设置</title>
+<style>body{max-width:520px;margin:24px auto;padding:0 16px;font:14px system-ui}input{width:100%;box-sizing:border-box;margin:6px 0 12px;padding:8px}button{margin:4px 4px 4px 0;padding:7px 12px}.muted{color:#888;font-size:12px}.card{border:1px solid #ddd;border-radius:10px;padding:14px;margin:14px 0}</style>
+</head><body>
+<h2>CookieVault 设置</h2>
+
+<div class="card">
+  <h3>1. 服务端连接</h3>
+  <label>服务端地址<input id="serverUrl" placeholder="http://127.0.0.1:18765" /></label>
+  <label>配对码（服务端启动时打印在日志里，5 分钟有效）
+    <input id="pairCode" placeholder="8 位数字" /></label>
+  <button id="pair">用配对码连接</button>
+  <span id="conn-status" class="muted"></span>
+  <p class="muted">连接成功后 Token 保存在插件本地（chrome.storage.local），之后自动鉴权。未设置主密码时，先在下方设置。</p>
+</div>
+
+<div class="card">
+  <h3>2. 主密码（加密密钥）</h3>
+  <div id="status" class="muted">状态查询中…</div>
+  <div id="setup-box">
+    <label>首次使用：设置主密码（至少 8 位）<input id="setup-pw" type="password" /></label>
+    <button id="setup">设置主密码并解锁</button>
+  </div>
+  <div id="unlock-box">
+    <label>解锁<input id="unlock-pw" type="password" /></label>
+    <button id="unlock">解锁</button>
+    <button id="lock">锁定</button>
+  </div>
+  <div id="change-box">
+    <label>改主密码 — 旧密码<input id="old-pw" type="password" /></label>
+    <label>新密码<input id="new-pw" type="password" /></label>
+    <button id="change">修改主密码</button>
+  </div>
+  <p class="muted">主密码遗忘 = 数据不可恢复。请妥善保管，改主密码只需重新包装密钥，不会重加密 Cookie。</p>
+</div>
+
+<div id="msg"></div>
+<script src="options.js"></script>
+</body></html>

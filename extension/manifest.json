@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "CookieVault",
+  "version": "0.1.0",
+  "description": "Save and restore browser cookies per account snapshot (local Go server, encrypted).",
+  "permissions": ["cookies", "storage", "sidePanel", "activeTab"],
+  "host_permissions": ["http://127.0.0.1:18765/*", "<all_urls>"],
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "CookieVault" },
+  "options_page": "options.html",
+  "background": { "service_worker": "background.js" }
+}

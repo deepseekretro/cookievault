@@ -1,0 +1,659 @@
+// Package api implements the HTTP API of CookieVault.
+//
+// Security model (P1):
+//   - Bind 127.0.0.1 only.
+//   - Host must be loopback; Origin (when present) must be a browser
+//     extension origin or loopback — this blocks DNS-rebinding / CSRF
+//     attempts from ordinary web pages.
+//   - Data endpoints require a Bearer token obtained via pairing.
+//   - Data endpoints also require the vault to be unlocked.
+package api
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	vaultcrypto "cookievault/server/internal/crypto"
+	"cookievault/server/internal/store"
+)
+
+const version = "0.1.0"
+
+// Server holds dependencies.
+type Server struct {
+	Store   *store.Store
+	Vault   *vaultcrypto.Vault
+	PairCode string
+	PairExp  time.Time
+
+	mu          sync.Mutex
+	unlockFails int
+	lockedUntil time.Time
+}
+
+// New creates a Server. pairCode is printed to the log at startup.
+func New(st *store.Store, v *vaultcrypto.Vault, pairCode string) *Server {
+	return &Server{Store: st, Vault: v, PairCode: pairCode, PairExp: time.Now().Add(5 * time.Minute)}
+}
+
+// Handler returns the root handler with guards applied.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/health", s.health)
+	mux.HandleFunc("GET /v1/auth/status", s.authStatus)
+	mux.HandleFunc("POST /v1/auth/setup", s.authSetup)
+	mux.HandleFunc("POST /v1/auth/unlock", s.authUnlock)
+	mux.HandleFunc("POST /v1/auth/lock", s.requireToken(s.authLock))
+	mux.HandleFunc("POST /v1/auth/change-password", s.requireToken(s.changePassword))
+	mux.HandleFunc("POST /v1/pair/verify", s.pairVerify)
+	mux.HandleFunc("POST /v1/pair/code", s.requireToken(s.pairCode))
+	mux.HandleFunc("GET /v1/profiles", s.requireToken(s.requireUnlocked(s.profileList)))
+	mux.HandleFunc("POST /v1/profiles", s.requireToken(s.requireUnlocked(s.profileCreate)))
+	mux.HandleFunc("DELETE /v1/profiles/{id}", s.requireToken(s.requireUnlocked(s.profileDelete)))
+	mux.HandleFunc("POST /v1/snapshots", s.requireToken(s.requireUnlocked(s.snapshotCreate)))
+	mux.HandleFunc("GET /v1/snapshots", s.requireToken(s.requireUnlocked(s.snapshotList)))
+	mux.HandleFunc("GET /v1/snapshots/{id}", s.requireToken(s.requireUnlocked(s.snapshotGet)))
+	mux.HandleFunc("PATCH /v1/snapshots/{id}", s.requireToken(s.requireUnlocked(s.snapshotUpdate)))
+	mux.HandleFunc("GET /v1/snapshots/{id}/cookies", s.requireToken(s.requireUnlocked(s.snapshotCookies)))
+	mux.HandleFunc("DELETE /v1/snapshots/{id}", s.requireToken(s.requireUnlocked(s.snapshotDelete)))
+	mux.HandleFunc("POST /v1/snapshots/{id}/touch", s.requireToken(s.requireUnlocked(s.snapshotTouch)))
+	return guard(mux)
+}
+
+// --- guards ---------------------------------------------------------------
+
+func guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Host must be loopback.
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			host = r.Host
+		}
+		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+			writeErr(w, http.StatusForbidden, "host_not_allowed")
+			return
+		}
+		// Origin, when present, must be an extension origin or loopback.
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !allowedOrigin(origin) {
+				writeErr(w, http.StatusForbidden, "origin_not_allowed")
+				return
+			}
+		}
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func allowedOrigin(origin string) bool {
+	if strings.HasPrefix(origin, "chrome-extension://") ||
+		strings.HasPrefix(origin, "extension://") ||
+		strings.HasPrefix(origin, "moz-extension://") {
+		return true
+	}
+	if strings.HasPrefix(origin, "http://127.0.0.1") ||
+		strings.HasPrefix(origin, "http://localhost") {
+		return true
+	}
+	return false
+}
+
+func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			writeErr(w, http.StatusUnauthorized, "missing_token")
+			return
+		}
+		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		ok, err := s.Store.TokenExists(store.HashToken(token))
+		if err != nil || !ok {
+			writeErr(w, http.StatusUnauthorized, "invalid_token")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) requireUnlocked(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.Vault.IsUnlocked() {
+			writeErr(w, http.StatusLocked, "vault_locked")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// --- helpers ----------------------------------------------------------------
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, status int, code string) {
+	writeJSON(w, status, map[string]string{"error": code})
+}
+
+func decodeJSON(r *http.Request, v any) error {
+	defer r.Body.Close()
+	return json.NewDecoder(r.Body).Decode(v)
+}
+
+func newID(prefix string) string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return prefix + "_" + hex.EncodeToString(b)
+}
+
+func newToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func nowMillis() int64 { return time.Now().UnixMilli() }
+
+// wrappedDEKBlob reconstructs WrappedDEK from meta storage.
+func (s *Server) loadWrappedDEK() (*vaultcrypto.WrappedDEK, error) {
+	salt, ok, err := s.Store.MetaGet("kdf_salt")
+	if !ok || err != nil {
+		return nil, fmt.Errorf("no salt: %w", err)
+	}
+	paramsBlob, _, _ := s.Store.MetaGet("kdf_params")
+	params, err := vaultcrypto.ParseParams(paramsBlob)
+	if err != nil {
+		return nil, err
+	}
+	nonce, _, _ := s.Store.MetaGet("dek_nonce")
+	wrapped, _, _ := s.Store.MetaGet("wrapped_dek")
+	return &vaultcrypto.WrappedDEK{Salt: salt, Params: params, Nonce: nonce, WrappedDEK: wrapped}, nil
+}
+
+func (s *Server) saveWrappedDEK(w *vaultcrypto.WrappedDEK) error {
+	if err := s.Store.MetaSet("kdf_salt", w.Salt); err != nil {
+		return err
+	}
+	if err := s.Store.MetaSet("kdf_params", vaultcrypto.ParamsBlob(w.Params)); err != nil {
+		return err
+	}
+	if err := s.Store.MetaSet("dek_nonce", w.Nonce); err != nil {
+		return err
+	}
+	return s.Store.MetaSet("wrapped_dek", w.WrappedDEK)
+}
+
+func (s *Server) issueToken(label string) (string, error) {
+	token, err := newToken()
+	if err != nil {
+		return "", err
+	}
+	if err := s.Store.TokenCreate(newID("tok"), store.HashToken(token), label, time.Now()); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// --- health / auth -----------------------------------------------------------
+
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": version})
+}
+
+func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
+	init, _ := s.Store.Initialized()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"initialized": init,
+		"unlocked":    s.Vault.IsUnlocked(),
+		"version":     version,
+	})
+}
+
+type passwordReq struct {
+	Password string `json:"password"`
+}
+
+func (s *Server) authSetup(w http.ResponseWriter, r *http.Request) {
+	init, _ := s.Store.Initialized()
+	if init {
+		writeErr(w, http.StatusConflict, "already_initialized")
+		return
+	}
+	var req passwordReq
+	if err := decodeJSON(r, &req); err != nil || len(req.Password) < 8 {
+		writeErr(w, http.StatusBadRequest, "password_too_short")
+		return
+	}
+	wrapped, dek, err := vaultcrypto.NewWrappedDEK(req.Password)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "crypto_error")
+		return
+	}
+	if err := s.saveWrappedDEK(wrapped); err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	s.Vault.Unlock(dek)
+	token, err := s.issueToken("setup")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "unlocked": true})
+}
+
+func (s *Server) authUnlock(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	if time.Now().Before(s.lockedUntil) {
+		s.mu.Unlock()
+		writeErr(w, http.StatusTooManyRequests, "too_many_attempts")
+		return
+	}
+	s.mu.Unlock()
+
+	var req passwordReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	wrapped, err := s.loadWrappedDEK()
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "not_initialized")
+		return
+	}
+	dek, err := vaultcrypto.UnwrapDEK(req.Password, wrapped)
+	if err != nil {
+		s.mu.Lock()
+		s.unlockFails++
+		if s.unlockFails >= 5 {
+			s.lockedUntil = time.Now().Add(30 * time.Second)
+			s.unlockFails = 0
+		}
+		s.mu.Unlock()
+		writeErr(w, http.StatusUnauthorized, "wrong_password")
+		return
+	}
+	s.mu.Lock()
+	s.unlockFails = 0
+	s.mu.Unlock()
+	s.Vault.Unlock(dek)
+	writeJSON(w, http.StatusOK, map[string]any{"unlocked": true})
+}
+
+func (s *Server) authLock(w http.ResponseWriter, r *http.Request) {
+	s.Vault.Lock()
+	writeJSON(w, http.StatusOK, map[string]any{"unlocked": false})
+}
+
+type changePasswordReq struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
+func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
+	var req changePasswordReq
+	if err := decodeJSON(r, &req); err != nil || len(req.NewPassword) < 8 {
+		writeErr(w, http.StatusBadRequest, "password_too_short")
+		return
+	}
+	wrapped, err := s.loadWrappedDEK()
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "not_initialized")
+		return
+	}
+	dek, err := vaultcrypto.UnwrapDEK(req.OldPassword, wrapped)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "wrong_password")
+		return
+	}
+	rewrapped, err := vaultcrypto.Rewrap(dek, req.NewPassword)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "crypto_error")
+		return
+	}
+	if err := s.saveWrappedDEK(rewrapped); err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// --- pairing ------------------------------------------------------------------
+
+func (s *Server) pairVerify(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	s.mu.Lock()
+	code, exp := s.PairCode, s.PairExp
+	s.mu.Unlock()
+	if req.Code == "" || req.Code != code || time.Now().After(exp) {
+		writeErr(w, http.StatusUnauthorized, "invalid_pair_code")
+		return
+	}
+	token, err := s.issueToken("pairing")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"token": token})
+}
+
+func (s *Server) pairCode(w http.ResponseWriter, r *http.Request) {
+	code, err := newPairCode()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "crypto_error")
+		return
+	}
+	s.mu.Lock()
+	s.PairCode = code
+	s.PairExp = time.Now().Add(5 * time.Minute)
+	s.mu.Unlock()
+	log.Printf("pair code regenerated: %s (valid 5m)", code)
+	writeJSON(w, http.StatusOK, map[string]any{"code": code, "expires_at": s.PairExp.Unix()})
+}
+
+func newPairCode() (string, error) {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	// 8-digit numeric-ish code
+	return fmt.Sprintf("%08d", int(b[0])<<24|int(b[1])<<16|int(b[2])<<8|int(b[3])%100000000), nil
+}
+
+// --- profiles ------------------------------------------------------------------
+
+func (s *Server) profileList(w http.ResponseWriter, r *http.Request) {
+	items, err := s.Store.ProfileList()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) profileCreate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+		Note string `json:"note"`
+	}
+	if err := decodeJSON(r, &req); err != nil || strings.TrimSpace(req.Name) == "" {
+		writeErr(w, http.StatusBadRequest, "name_required")
+		return
+	}
+	now := nowMillis()
+	p := store.Profile{ID: newID("p"), Name: req.Name, Note: req.Note, CreatedAt: now, UpdatedAt: now}
+	if err := s.Store.ProfileCreate(p); err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	writeJSON(w, http.StatusCreated, p)
+}
+
+func (s *Server) profileDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.Store.ProfileDelete(r.PathValue("id")); err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- snapshots ------------------------------------------------------------------
+
+type snapshotCreateReq struct {
+	ProfileID string             `json:"profile_id"`
+	Domain    string             `json:"domain"`
+	Label     string             `json:"label"`
+	Note      string             `json:"note"`
+	SourceURL string             `json:"source_url"`
+	StoreID   string             `json:"store_id"`
+	IsReplace *bool              `json:"is_replace"`
+	Cookies   []store.CookieInput `json:"cookies"`
+}
+
+func (s *Server) snapshotCreate(w http.ResponseWriter, r *http.Request) {
+	var req snapshotCreateReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if strings.TrimSpace(req.Label) == "" {
+		writeErr(w, http.StatusBadRequest, "label_required")
+		return
+	}
+	if req.Domain == "" && len(req.Cookies) > 0 {
+		req.Domain = req.Cookies[0].Domain
+	}
+	if req.Domain == "" {
+		writeErr(w, http.StatusBadRequest, "domain_required")
+		return
+	}
+
+	encCookies := make([]store.EncryptedCookie, 0, len(req.Cookies))
+	var fpParts []string
+	httpOnly := 0
+	// Deduplicate within this snapshot by (name,domain,path,partitioned,store).
+	seen := map[string]bool{}
+	for _, c := range req.Cookies {
+		key := c.Name + "\x00" + c.Domain + "\x00" + c.Path + "\x00" + c.PartitionKey
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		nonce, enc, err := s.Vault.Encrypt(c.Value)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "crypto_error")
+			return
+		}
+		var exp *int64
+		if c.ExpirationDate != nil {
+			v := int64(*c.ExpirationDate)
+			exp = &v
+		}
+		ec := store.EncryptedCookie{
+			Input: c, ValueEnc: enc, Nonce: nonce,
+			Hash: store.Fingerprint([]string{c.Name, c.Domain, c.Path, c.Value}),
+			ExpiresAt: exp,
+		}
+		encCookies = append(encCookies, ec)
+		fpParts = append(fpParts, c.Name, c.Domain, c.Path, c.Value)
+		if c.HTTPOnly {
+			httpOnly++
+		}
+	}
+
+	isReplace := true
+	if req.IsReplace != nil {
+		isReplace = *req.IsReplace
+	}
+	now := nowMillis()
+	snap := store.Snapshot{
+		ID: newID("s"), ProfileID: req.ProfileID, Domain: req.Domain,
+		Label: req.Label, Note: req.Note, SourceURL: req.SourceURL,
+		StoreID: req.StoreID, IsReplace: isReplace,
+		Fingerprint: store.Fingerprint(fpParts),
+		CookieCount: len(encCookies), HTTPOnlyCount: httpOnly,
+		CreatedAt: now, LastUsedAt: now,
+	}
+	if err := s.Store.SnapshotCreate(snap, encCookies); err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	writeJSON(w, http.StatusCreated, snap)
+}
+
+func (s *Server) snapshotList(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	// cursor is base64url("<key>\n<id>") produced by encodeCursorObj.
+	var cursorKey, cursorID string
+	if cur := q.Get("cursor"); cur != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(cur)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_cursor")
+			return
+		}
+		k, id, ok := store.DecodeCursor(string(raw))
+		if !ok {
+			writeErr(w, http.StatusBadRequest, "bad_cursor")
+			return
+		}
+		cursorKey, cursorID = k, id
+	}
+	lq := store.ListQuery{
+		Q: q.Get("q"), Domain: q.Get("domain"), ProfileID: q.Get("profile_id"),
+		Sort: q.Get("sort"), Limit: limit, CursorKey: cursorKey, CursorID: cursorID,
+	}
+	total, err := s.Store.SnapshotCount(lq)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	res, err := s.Store.SnapshotList(lq)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	out := map[string]any{
+		"items": res.Items, "has_more": res.HasMore, "total": total,
+	}
+	if res.HasMore {
+		out["next_cursor"] = base64.RawURLEncoding.EncodeToString([]byte(res.NextCursor))
+	} else {
+		out["next_cursor"] = ""
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) snapshotGet(w http.ResponseWriter, r *http.Request) {
+	snap, ok, err := s.Store.SnapshotGet(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+func (s *Server) snapshotUpdate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Label string `json:"label"`
+		Note  string `json:"note"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	id := r.PathValue("id")
+	if _, ok, _ := s.Store.SnapshotGet(id); !ok {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	// Allow partial update: empty label keeps existing.
+	snap, _, _ := s.Store.SnapshotGet(id)
+	label := req.Label
+	if label == "" {
+		label = snap.Label
+	}
+	if err := s.Store.SnapshotUpdate(id, label, req.Note); err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+type cookieOut struct {
+	Name           string  `json:"name"`
+	Value          string  `json:"value"`
+	Domain         string  `json:"domain"`
+	HostOnly       bool    `json:"hostOnly"`
+	Path           string  `json:"path"`
+	Secure         bool    `json:"secure"`
+	HTTPOnly       bool    `json:"httpOnly"`
+	SameSite       string  `json:"sameSite"`
+	ExpirationDate *float64 `json:"expirationDate,omitempty"`
+	PartitionKey   string  `json:"partitionKey,omitempty"`
+	Partitioned    bool    `json:"partitioned,omitempty"`
+}
+
+func (s *Server) snapshotCookies(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok, _ := s.Store.SnapshotGet(id); !ok {
+		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+	stored, err := s.Store.SnapshotCookies(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	filter := strings.ToLower(r.URL.Query().Get("q"))
+	items := make([]cookieOut, 0, len(stored))
+	for _, c := range stored {
+		val, err := s.Vault.Decrypt(c.Nonce, c.ValueEnc)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "decrypt_error")
+			return
+		}
+		if filter != "" && !strings.Contains(strings.ToLower(c.Name), filter) &&
+			!strings.Contains(strings.ToLower(c.Domain), filter) {
+			continue
+		}
+		var exp *float64
+		if c.ExpiresAt != nil {
+			v := float64(*c.ExpiresAt)
+			exp = &v
+		}
+		items = append(items, cookieOut{
+			Name: c.Name, Value: val, Domain: c.Domain, HostOnly: c.HostOnly,
+			Path: c.Path, Secure: c.Secure, HTTPOnly: c.HTTPOnly,
+			SameSite: c.SameSite, ExpirationDate: exp,
+			PartitionKey: c.PartitionKey, Partitioned: c.Partitioned,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+}
+
+func (s *Server) snapshotDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.Store.SnapshotDelete(r.PathValue("id")); err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) snapshotTouch(w http.ResponseWriter, r *http.Request) {
+	if err := s.Store.SnapshotTouch(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "storage_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
