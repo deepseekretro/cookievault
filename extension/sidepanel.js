@@ -264,7 +264,8 @@ async function clearSiteCookies() {
       try {
         const r = await chrome.runtime.sendMessage({ type: 'CLEAR', domain: domain || undefined });
         if (!r.ok) throw new Error(r.error);
-        toast(`已清空 ${r.result.domain} 的 ${r.result.removed} 个 Cookie，请刷新页面测试未登录状态`);
+        const res = r.result;
+        toast(`已清空 ${res.domain}：删除 ${res.removed}/${res.total} 个${res.failed ? `，失败 ${res.failed}（${res.failures.join(', ')}）` : ''}${res.remaining ? `，仍剩 ${res.remaining} 个（站点可能重新写入）` : ''}，请刷新页面测试未登录状态`);
       } catch (e) { toast('清空失败：' + e.message); }
     },
   });

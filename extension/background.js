@@ -38,10 +38,44 @@ function partitionKeyFromString(s) {
   try { return JSON.parse(s); } catch { return undefined; }
 }
 
-async function collectCookies(domain, storeId) {
-  const opts = { domain };
-  if (storeId) opts.storeId = storeId;
-  const cookies = await chrome.cookies.getAll(opts);
+// chrome.cookies.getAll({domain}) only returns cookies whose domain
+// matches or is a subdomain of the given domain — it does NOT return
+// parent-domain cookies. A login cookie set for ".example.com" is
+// invisible from a tab on "sub.example.com". So enumerate every parent
+// domain, plus match by the current page URL, and de-duplicate.
+function parentDomains(hostname) {
+  const parts = String(hostname || '').replace(/^\./, '').split('.').filter(Boolean);
+  const out = [];
+  while (parts.length >= 2) { out.push(parts.join('.')); parts.shift(); }
+  return out;
+}
+
+async function getAllCookiesForDomain(domain, tabUrl, storeId) {
+  const byKey = new Map();
+  const add = (list) => {
+    for (const c of list || []) {
+      const key = [c.name, c.domain, c.path, c.storeId || '', partitionKeyToString(c.partitionKey)].join('\x00');
+      if (!byKey.has(key)) byKey.set(key, c);
+    }
+  };
+  for (const d of parentDomains(domain)) {
+    const opts = { domain: d };
+    if (storeId) opts.storeId = storeId;
+    try { add(await chrome.cookies.getAll(opts)); } catch { /* ignore */ }
+  }
+  if (tabUrl) {
+    try { add(await chrome.cookies.getAll({ url: tabUrl })); } catch { /* ignore */ }
+  }
+  const out = [...byKey.values()];
+  if (!out.length && domain) {
+    // Last resort: the plain call (older Chromium behaviour).
+    try { return await chrome.cookies.getAll({ domain }); } catch { return []; }
+  }
+  return out;
+}
+
+async function collectCookies(domain, storeId, tabUrl) {
+  const cookies = await getAllCookiesForDomain(domain, tabUrl, storeId);
   return cookies.map((c) => ({
     name: c.name,
     value: c.value,
@@ -54,11 +88,41 @@ async function collectCookies(domain, storeId) {
     expirationDate: c.expirationDate,
     partitionKey: partitionKeyToString(c.partitionKey),
     partitioned: !!c.partitionKey,
+    storeId: c.storeId,
   }));
 }
 
+// Try several url/store/partitionKey combinations; chrome.cookies.remove
+// returns null when the url does not match the cookie.
+async function removeCookieRobust(c) {
+  const host = String(c.domain || '').replace(/^\./, '');
+  const schemes = [c.secure ? 'https' : 'http', c.secure ? 'http' : 'https'];
+  const paths = [c.path || '/', '/'];
+  const pk = c.partitionKey ? partitionKeyFromString(partitionKeyToString(c.partitionKey)) : undefined;
+  for (const scheme of schemes) {
+    for (const path of paths) {
+      const base = { url: `${scheme}://${host}${path}`, name: c.name };
+      const variants = [
+        { ...base, storeId: c.storeId, ...(pk ? { partitionKey: pk } : {}) },
+        { ...base, ...(pk ? { partitionKey: pk } : {}) },
+        base,
+      ];
+      for (const details of variants) {
+        try {
+          const r = await chrome.cookies.remove(details);
+          if (r) return true;
+        } catch { /* try next variant */ }
+      }
+      // Only the scheme matching the cookie's secure flag can succeed;
+      // skip the other scheme's paths once one scheme is exhausted.
+      if (scheme === (c.secure ? 'https' : 'http') && paths.length > 1) continue;
+    }
+  }
+  return false;
+}
+
 async function saveSnapshot({ label, note = '', domain, sourceUrl = '', isReplace = true, profileId = '' }) {
-  const cookies = await collectCookies(domain);
+  const cookies = await collectCookies(domain, undefined, sourceUrl || undefined);
   if (!cookies.length) throw new Error('no cookies found for ' + domain);
   const snap = await api('/v1/snapshots', {
     method: 'POST',
@@ -104,19 +168,20 @@ async function getActiveTabDomain() {
   try { return new URL(tab.url).hostname; } catch { return ''; }
 }
 
-// Remove every cookie for a domain; returns the number removed.
-async function clearCookies(domain) {
-  const existing = await chrome.cookies.getAll({ domain });
+// Remove every cookie visible to a domain (incl. parent-domain cookies).
+async function clearCookies(domain, tabUrl) {
+  const existing = await getAllCookiesForDomain(domain, tabUrl);
   let removed = 0;
+  const failures = [];
   for (const c of existing) {
-    try {
-      const r = await chrome.cookies.remove({ url: cookieUrl(c), name: c.name, storeId: c.storeId });
-      if (r) removed++;
-    } catch { /* best effort */ }
+    if (await removeCookieRobust(c)) removed++;
+    else failures.push(c.name);
   }
+  // Verify what is actually left (some cookies may be re-set by the site).
+  const remaining = await getAllCookiesForDomain(domain, tabUrl);
   // Make the pre-lock watcher aware the domain is now empty.
   await rememberFingerprint(domain, []).catch(() => {});
-  return { domain, removed, total: existing.length };
+  return { domain, removed, failed: failures.length, failures, total: existing.length, remaining: remaining.length };
 }
 
 function cookieUrl(c) {
@@ -149,12 +214,9 @@ async function restoreSnapshot(id, { replace = true, backupBefore = true } = {})
 
   let removed = 0;
   if (replace) {
-    const existing = await chrome.cookies.getAll({ domain: snap.domain });
+    const existing = await getAllCookiesForDomain(snap.domain, snap.source_url || undefined);
     for (const c of existing) {
-      try {
-        await chrome.cookies.remove({ url: cookieUrl(c), name: c.name, storeId: c.storeId });
-        removed++;
-      } catch { /* best effort */ }
+      if (await removeCookieRobust(c)) removed++;
     }
   }
 
@@ -259,9 +321,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'CLEAR': {
           // Always clear the domain of the page the user is currently
           // looking at (active tab), not a cached/configured domain.
-          const domain = msg.domain || (await getActiveTabDomain());
+          let domain = msg.domain || '';
+          let tabUrl = '';
+          try {
+            const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (tabs[0]?.url) { tabUrl = tabs[0].url; domain = domain || new URL(tabUrl).hostname; }
+          } catch { /* fall through */ }
           if (!domain) return sendResponse({ ok: false, error: '无法识别当前标签页的域名' });
-          return sendResponse({ ok: true, result: await clearCookies(domain) });
+          return sendResponse({ ok: true, result: await clearCookies(domain, tabUrl || undefined) });
         }
         case 'RESTORE': return sendResponse({ ok: true, result: await restoreSnapshot(msg.id, msg.options) });
         case 'API': return sendResponse({ ok: true, data: await api(msg.path, { method: msg.method || 'GET', body: msg.body ? JSON.stringify(msg.body) : undefined }) });
