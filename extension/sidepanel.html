@@ -9,6 +9,7 @@
 <body>
   <nav class="tabbar">
     <button class="tab active" data-tab="data">数据</button>
+    <button class="tab" data-tab="email">邮箱生成</button>
     <button class="tab" data-tab="settings">设置</button>
   </nav>
 
@@ -97,6 +98,61 @@
     </main>
   </div>
   </div><!-- /tab-data -->
+
+  <!-- ======== Tab: 邮箱生成 ======== -->
+  <div id="tab-email" class="hidden">
+    <main class="settings-scroll">
+      <section class="panel-card">
+        <h3>日本姓名与随机邮箱</h3>
+        <div class="grid2">
+          <label class="full">邮箱后缀（可选择，也可直接输入）
+            <input id="email-domain" type="text" list="email-domain-options" placeholder="例如 gmail.com" autocomplete="off" autocapitalize="none" spellcheck="false" />
+            <datalist id="email-domain-options">
+              <option value="gmail.com"></option><option value="outlook.com"></option>
+              <option value="hotmail.com"></option><option value="yahoo.com"></option>
+              <option value="yahoo.co.jp"></option><option value="icloud.com"></option>
+              <option value="proton.me"></option><option value="example.com"></option>
+            </datalist>
+            <span class="hint">只填域名，不需要完整邮箱；开头的 @ 会自动去掉。</span>
+          </label>
+          <label>名字库
+            <select id="email-gender">
+              <option value="mixed">男女混合</option><option value="male">男性名字</option><option value="female">女性名字</option>
+            </select>
+          </label>
+          <label>生成数量 <input id="email-count" type="number" min="1" max="500" step="1" /></label>
+          <label>邮箱账号格式
+            <select id="email-pattern">
+              <option value="given.surname">名.姓.随机字符</option>
+              <option value="surname.given">姓.名.随机字符</option>
+              <option value="given_surname">名_姓_随机字符</option>
+              <option value="surnamegiven">姓名随机字符</option>
+              <option value="random">纯随机字母数字</option>
+            </select>
+          </label>
+          <label>随机字符长度
+            <select id="email-randomLength">
+              <option value="4">4 位</option><option value="6">6 位</option><option value="8">8 位</option><option value="12">12 位</option>
+            </select>
+          </label>
+          <label class="full">输出内容
+            <select id="email-outputMode">
+              <option value="both">日本姓名 + 邮箱</option>
+              <option value="email">仅邮箱</option>
+              <option value="detail">日本姓名 + 罗马字 + 邮箱</option>
+            </select>
+          </label>
+        </div>
+        <textarea id="email-output" class="email-output" readonly spellcheck="false" placeholder="选择或输入邮箱后缀，然后点击生成"></textarea>
+        <div class="actions-row">
+          <button id="email-generate" class="btn primary small">随机生成</button>
+          <button id="email-copyAll" class="btn small">复制结果</button>
+          <button id="email-copyEmails" class="btn small">仅复制邮箱</button>
+        </div>
+        <div id="email-status" class="muted" role="status">本地生成；生成的邮箱不代表已注册或可收信。</div>
+      </section>
+    </main>
+  </div>
 
   <!-- ======== Tab: 设置 ======== -->
   <div id="tab-settings" class="hidden">

@@ -521,15 +521,16 @@ async function exportSnapshot(snap) {
 }
 $('export-btn').addEventListener('click', () => state.detailSnapshot && exportSnapshot(state.detailSnapshot));
 
-// ---------- tabs (数据 / 设置) ----------
+// ---------- tabs (数据 / 邮箱生成 / 设置) ----------
 document.querySelectorAll('.tab').forEach((btn) => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b === btn));
-    const isSettings = btn.dataset.tab === 'settings';
-    $('tab-data').classList.toggle('hidden', isSettings);
-    $('tab-settings').classList.toggle('hidden', !isSettings);
-    if (isSettings) refreshSettingsTab();
-    else snapList.render();
+    const tab = btn.dataset.tab;
+    $('tab-data').classList.toggle('hidden', tab !== 'data');
+    $('tab-email').classList.toggle('hidden', tab !== 'email');
+    $('tab-settings').classList.toggle('hidden', tab !== 'settings');
+    if (tab === 'settings') refreshSettingsTab();
+    if (tab === 'data') snapList.render();
   });
 });
 
@@ -663,6 +664,243 @@ $('set-import').addEventListener('click', async () => {
   } catch (e) { $('set-backup-status').textContent = '导入失败：' + e.message; }
 });
 
+// ---------- 邮箱生成 (Japanese name + random email) ----------
+const JP_STORAGE_KEY = 'jp-name-email-generator.v2';
+const jpParse = (text) => text.trim().split('\n').map((line) => line.trim().split('|'));
+const jpSurnames = jpParse(`
+佐藤|sato
+鈴木|suzuki
+高橋|takahashi
+田中|tanaka
+伊藤|ito
+渡辺|watanabe
+山本|yamamoto
+中村|nakamura
+小林|kobayashi
+加藤|kato
+吉田|yoshida
+山田|yamada
+佐々木|sasaki
+山口|yamaguchi
+松本|matsumoto
+井上|inoue
+木村|kimura
+林|hayashi
+斎藤|saito
+清水|shimizu
+山崎|yamazaki
+森|mori
+池田|ikeda
+橋本|hashimoto
+阿部|abe
+石川|ishikawa
+山下|yamashita
+中島|nakajima
+石井|ishii
+小川|ogawa
+前田|maeda
+岡田|okada
+長谷川|hasegawa
+藤田|fujita
+後藤|goto
+近藤|kondo
+村上|murakami
+遠藤|endo
+青木|aoki
+坂本|sakamoto
+`);
+const jpMaleNames = jpParse(`
+翔太|shota
+大輔|daisuke
+健太|kenta
+拓也|takuya
+直樹|naoki
+和也|kazuya
+達也|tatsuya
+悠太|yuta
+翔|sho
+蓮|ren
+陸|riku
+大和|yamato
+悠真|yuma
+湊|minato
+樹|itsuki
+颯太|sota
+陽太|yota
+健一|kenichi
+誠|makoto
+智也|tomoya
+亮介|ryosuke
+俊介|shunsuke
+直人|naoto
+雄大|yudai
+海斗|kaito
+`);
+const jpFemaleNames = jpParse(`
+美咲|misaki
+由美|yumi
+優子|yuko
+陽子|yoko
+愛|ai
+愛美|manami
+彩|aya
+彩香|ayaka
+香織|kaori
+真由美|mayumi
+恵子|keiko
+直美|naomi
+美穂|miho
+七海|nanami
+葵|aoi
+凛|rin
+結衣|yui
+結菜|yuina
+陽菜|hina
+美月|mizuki
+さくら|sakura
+ひなた|hinata
+琴音|kotone
+花音|kanon
+莉子|riko
+`);
+const JP_DEFAULTS = { gender: 'mixed', domain: 'gmail.com', count: 10, pattern: 'given.surname', randomLength: 6, output: 'both' };
+let jpSettings = { ...JP_DEFAULTS };
+let jpRecords = [];
+
+function jpSetStatus(message, isError = false) {
+  const el = $('email-status');
+  el.textContent = message;
+  el.classList.toggle('error', !!isError);
+}
+function jpSetSelect(id, value, fallback) {
+  const el = $(id);
+  const valid = [...el.options].some((o) => o.value === String(value));
+  el.value = valid ? String(value) : String(fallback);
+}
+async function jpLoadSettings() {
+  try {
+    const saved = await chrome.storage.local.get([JP_STORAGE_KEY]);
+    const s = saved[JP_STORAGE_KEY];
+    if (s && typeof s === 'object') jpSettings = { ...JP_DEFAULTS, ...s };
+  } catch { /* ignore */ }
+  jpSetSelect('email-gender', jpSettings.gender, JP_DEFAULTS.gender);
+  jpSetSelect('email-pattern', jpSettings.pattern, JP_DEFAULTS.pattern);
+  jpSetSelect('email-randomLength', jpSettings.randomLength, JP_DEFAULTS.randomLength);
+  jpSetSelect('email-outputMode', jpSettings.output, JP_DEFAULTS.output);
+  $('email-domain').value = typeof jpSettings.domain === 'string' ? jpSettings.domain : JP_DEFAULTS.domain;
+  $('email-count').value = String(jpSettings.count ?? JP_DEFAULTS.count);
+}
+function jpReadSettings() {
+  const raw = Number($('email-count').value);
+  const count = Number.isFinite(raw) ? Math.max(1, Math.min(500, Math.trunc(raw))) : JP_DEFAULTS.count;
+  $('email-count').value = String(count);
+  return {
+    gender: $('email-gender').value,
+    domain: $('email-domain').value.trim(),
+    count,
+    pattern: $('email-pattern').value,
+    randomLength: Number($('email-randomLength').value),
+    output: $('email-outputMode').value,
+  };
+}
+async function jpSaveSettings() {
+  jpSettings = jpReadSettings();
+  try { await chrome.storage.local.set({ [JP_STORAGE_KEY]: jpSettings }); } catch { /* ignore */ }
+  return jpSettings;
+}
+function jpNormalizeDomain(value) {
+  const domain = String(value).trim().replace(/^@/, '').toLowerCase();
+  if (!domain) throw new Error('请填写邮箱后缀，例如 gmail.com。');
+  const labels = domain.split('.');
+  const valid = domain.length <= 253 && labels.length >= 2 &&
+    labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) &&
+    !/^\d+$/.test(labels[labels.length - 1]);
+  if (!valid) throw new Error('邮箱后缀格式不正确。请填写类似 example.com 的域名，不要包含 https://、路径、空格或完整邮箱。');
+  return domain;
+}
+function jpRandomInt(max) {
+  const range = 0x100000000;
+  const limit = range - (range % max);
+  const buffer = new Uint32Array(1);
+  do { crypto.getRandomValues(buffer); } while (buffer[0] >= limit);
+  return buffer[0] % max;
+}
+function jpRandomString(length) {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  return Array.from({ length }, () => alphabet[jpRandomInt(alphabet.length)]).join('');
+}
+function jpMakeAccount(surname, given, options) {
+  const suffix = jpRandomString(options.randomLength);
+  switch (options.pattern) {
+    case 'surname.given': return `${surname}.${given}.${suffix}`;
+    case 'given_surname': return `${given}_${surname}_${suffix}`;
+    case 'surnamegiven': return `${surname}${given}${suffix}`;
+    case 'random': return suffix;
+    default: return `${given}.${surname}.${suffix}`;
+  }
+}
+function jpRenderOutput() {
+  const mode = $('email-outputMode').value;
+  $('email-output').value = jpRecords.map((r) => {
+    if (mode === 'email') return r.email;
+    if (mode === 'detail') return `${r.name}\t${r.romaji}\t${r.email}`;
+    return `${r.name}\t${r.email}`;
+  }).join('\n');
+}
+function jpGenerate() {
+  try {
+    const options = jpReadSettings();
+    const domain = jpNormalizeDomain(options.domain);
+    $('email-domain').value = domain;
+    jpSaveSettings();
+    const names = options.gender === 'male' ? jpMaleNames : options.gender === 'female' ? jpFemaleNames : [...jpMaleNames, ...jpFemaleNames];
+    const pool = jpSurnames.flatMap((surname) => names.map((given) => ({ surname, given })));
+    const count = Math.min(options.count, pool.length);
+    const nextRecords = [];
+    const usedEmails = new Set();
+    for (let i = 0; i < count; i++) {
+      const j = i + jpRandomInt(pool.length - i);
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+      const { surname, given } = pool[i];
+      let email = '';
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const candidate = `${jpMakeAccount(surname[1], given[1], options)}@${domain}`;
+        if (!usedEmails.has(candidate)) { email = candidate; break; }
+      }
+      if (!email) throw new Error('随机邮箱去重失败，请增加随机字符长度后重试。');
+      usedEmails.add(email);
+      nextRecords.push({ name: `${surname[0]} ${given[0]}`, romaji: `${surname[1]} ${given[1]}`, email });
+    }
+    jpRecords = nextRecords;
+    jpRenderOutput();
+    jpSetStatus(`已生成 ${jpRecords.length} 条；本批姓名和邮箱均不重复；后缀：@${domain}。`);
+  } catch (error) {
+    jpSetStatus(error.message || '生成失败，请检查设置。', true);
+  }
+}
+async function jpCopyText(text) {
+  if (!text) { jpSetStatus('请先生成结果。', true); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    jpSetStatus(`已复制 ${text.split('\n').length} 条记录。`);
+  } catch {
+    // Fallback for clipboard permission issues.
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy'); ta.remove();
+      jpSetStatus(ok ? `已复制 ${text.split('\n').length} 条记录。` : '复制失败，请在结果框中手动选择并复制。', !ok);
+    } catch { jpSetStatus('复制失败，请在结果框中手动选择并复制。', true); }
+  }
+}
+$('email-generate').addEventListener('click', jpGenerate);
+$('email-copyAll').addEventListener('click', () => jpCopyText($('email-output').value));
+$('email-copyEmails').addEventListener('click', () => jpCopyText(jpRecords.map((r) => r.email).join('\n')));
+for (const id of ['email-domain', 'email-gender', 'email-count', 'email-pattern', 'email-randomLength', 'email-outputMode']) {
+  $(id).addEventListener('change', () => { jpSaveSettings(); if (id === 'email-outputMode') jpRenderOutput(); });
+}
+$('email-domain').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); jpGenerate(); } });
+
 // ---------- init ----------
 (async function init() {
   try {
@@ -671,6 +909,7 @@ $('set-import').addEventListener('click', async () => {
       try { state.currentDomain = new URL(tabs[0].url).hostname; } catch { /* ignore */ }
     }
   } catch { /* tabs permission may be absent */ }
+  await jpLoadSettings();
   await loadGroups();
   loadSnapshots(true);
 })();
