@@ -147,6 +147,7 @@ function syncList() {
 async function loadSnapshots(reset) {
   if (state.loading) return;
   if (reset) {
+    await refreshCurrentDomain();
     state.itemsById.clear(); state.items = []; state.cursor = ''; state.hasMore = false; state.total = 0;
     $('scroll').scrollTop = 0;
     syncList();
@@ -161,7 +162,11 @@ async function loadSnapshots(reset) {
     const q = $('search').value.trim();
     if (q) params.set('q', q);
     if ($('filter-group').value) params.set('domain', $('filter-group').value);
-    if ($('filter-current-domain').checked && state.currentDomain) params.set('domain', state.currentDomain);
+    // Filter by the current site's MAIN domain so snapshots stored under
+    // the parent domain (e.g. example.com) also match a sub-domain tab
+    // (e.g. sub.example.com). The server matches domain with LIKE, so
+    // passing the main domain covers all its sub-domains.
+    if ($('filter-current-domain').checked && state.currentDomain) params.set('domain', mainDomain(state.currentDomain));
     if (state.cursor) params.set('cursor', state.cursor);
 
     const data = await api('/v1/snapshots?' + params.toString());
@@ -217,7 +222,19 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && document.activeElement === $('search')) { $('search').value = ''; loadSnapshots(true); }
 });
 $('sort').addEventListener('change', () => loadSnapshots(true));
-$('filter-current-domain').addEventListener('change', () => loadSnapshots(true));
+$('filter-current-domain').addEventListener('change', async () => {
+  if ($('filter-current-domain').checked) await refreshCurrentDomain();
+  loadSnapshots(true);
+});
+
+// Always read the active tab's domain fresh (it changes as the user navigates).
+async function refreshCurrentDomain() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tabs[0]?.url) state.currentDomain = new URL(tabs[0].url).hostname;
+  } catch { /* ignore */ }
+  return state.currentDomain;
+}
 $('error-retry').addEventListener('click', () => loadSnapshots(true));
 $('to-top').addEventListener('click', () => $('scroll').scrollTo({ top: 0, behavior: 'smooth' }));
 
@@ -427,6 +444,17 @@ $('cookie-search').addEventListener('input', () => {
 async function doRestore() {
   const snap = state.detailSnapshot;
   if (!snap) return;
+  // Main-domain check: only restore when the snapshot's main domain
+  // matches the main domain of the page in the active tab.
+  const tabDomain = await refreshCurrentDomain();
+  if (tabDomain) {
+    const snapMain = mainDomain(snap.domain);
+    const tabMain = mainDomain(tabDomain);
+    if (snapMain !== tabMain) {
+      toast(`主域名不匹配：当前站点 ${tabDomain}（主域名 ${tabMain}），该快照属于 ${snapMain}，不能恢复。请先打开该站点的页面再恢复。`);
+      return;
+    }
+  }
   const replace = $('restore-replace').checked;
   const backup = $('restore-backup').checked;
   showModal({

@@ -190,9 +190,28 @@ function cookieUrl(c) {
   return `${scheme}://${host}${c.path || '/'}`;
 }
 
+const SECOND_LEVEL_SUFFIXES = new Set(['co.uk','org.uk','ac.uk','gov.uk','com.cn','net.cn','org.cn','gov.cn','edu.cn','com.au','net.au','org.au','co.jp','ne.jp','co.kr','com.hk','com.tw','co.nz','co.za','com.br']);
+function mainDomainOf(host) {
+  const h = String(host || '').replace(/^\./, '').toLowerCase();
+  const parts = h.split('.').filter(Boolean);
+  if (parts.length <= 2) return h;
+  if (SECOND_LEVEL_SUFFIXES.has(parts.slice(-2).join('.'))) return parts.slice(-3).join('.');
+  return parts.slice(-2).join('.');
+}
+
 async function restoreSnapshot(id, { replace = true, backupBefore = true } = {}) {
   const { items } = await api(`/v1/snapshots/${id}/cookies`);
   const snap = await api(`/v1/snapshots/${id}`);
+  // Main-domain check: the snapshot may only be restored on a page whose
+  // main domain matches the snapshot's main domain.
+  const tabDomain = await getActiveTabDomain();
+  if (tabDomain) {
+    const snapMain = mainDomainOf(snap.domain);
+    const tabMain = mainDomainOf(tabDomain);
+    if (snapMain !== tabMain) {
+      throw new Error(`主域名不匹配：当前站点 ${tabDomain}（主域名 ${tabMain}），该快照属于 ${snapMain}，不能恢复`);
+    }
+  }
 
   let backupId = null;
   if (backupBefore) {
