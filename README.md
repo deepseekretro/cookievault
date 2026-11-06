@@ -40,9 +40,27 @@ curl -X POST http://127.0.0.1:18765/v1/auth/setup \
   -d '{"password":"your-master-password"}'
 ```
 
-### 2. 加载插件
+### 2. 加载插件（一键下载）
 
-Chrome / Edge → 扩展 → 开发者模式 → **加载已解压的扩展程序** → 选择本仓库的 `extension/` 目录。
+Linux / macOS：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/deepseekretro/cookievault/master/scripts/download-extension.sh | bash
+```
+
+Windows（PowerShell）：
+
+```powershell
+irm https://raw.githubusercontent.com/deepseekretro/cookievault/master/scripts/download-extension.ps1 | iex
+```
+
+脚本会下载最新 Release 的 `cookievault-extension.zip`（无 Release 时自动回退到源码压缩包），解压到：
+
+- Linux/macOS：`~/.local/share/cookievault/extension`
+- Windows：`%LOCALAPPDATA%\CookieVault\extension`
+
+然后 Chrome/Edge → 扩展 → 开发者模式 → **加载已解压的扩展程序** → 选择该目录。
+也可以直接手动加载本仓库的 `extension/` 目录，效果相同。
 
 ### 3. 连接与使用
 
@@ -64,6 +82,8 @@ Chrome / Edge → 扩展 → 开发者模式 → **加载已解压的扩展程�
 cd server && go vet ./... && go test ./...
 cd ../extension && node --check background.js sidepanel.js popup.js options.js
 ```
+
+维护者发布 Release 前先打包：`scripts/package-extension.sh`（或 `.ps1`）生成 `cookievault-extension.zip` 附到 Release，一键脚本会优先下载它。
 
 ## P3 已实现
 
